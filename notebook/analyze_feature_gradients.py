@@ -9,7 +9,7 @@ import itertools
 # ========== 参数设置 ==========
 FEATURE_CSV = "/Users/shulei/PycharmProjects/Plaszyme/test/outputs/t1.csv"
 CO_MATRIX_CSV = "/Users/shulei/PycharmProjects/Plaszyme/test/outputs/plastic_co_matrix.csv"
-MODEL_PATH = "/Users/shulei/PycharmProjects/Plaszyme/notebook/run9/siamese_model.pt"
+MODEL_PATH = "/notebook/outputs/run9/siamese_model.pt"
 OUTPUT_DIR = "/Users/shulei/PycharmProjects/Plaszyme/notebook/grad_analysis/run9"
 
 LOSS_MODE = "contrastive"   # "mse" 或 "contrastive"

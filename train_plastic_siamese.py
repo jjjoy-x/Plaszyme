@@ -16,19 +16,19 @@ from fpdf import FPDF
 from plastic.mol_features.descriptors_rdkit import PlasticFeaturizer
 
 # ===================== 用户配置 =====================
-RUN_NAME = "run/run_from_sdf_4"
+RUN_NAME = "run/run_from_sdf_5"
 SDF_DIR = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf"
 CONFIG_PATH = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mol_features/rdkit_features.yaml"
 CO_MATRIX_CSV = "/Users/shulei/PycharmProjects/Plaszyme/test/outputs/plastic_co_matrix.csv"
 
-LOSS_MODE = "contrastive"
+LOSS_MODE = "mse" #"mse" 或 "contrastive"
 MARGIN = 1.5
 SIM_THRESHOLD = 0.01
 BATCH_SIZE = 16
 EPOCHS = 200
 LR = 1e-4
 PLOT_INTERVAL = 5
-REDUCTION_METHOD = "pca" # 降维方式可选: "pca", "umap", "tsne"
+REDUCTION_METHOD = "tsne" # 降维方式可选: "pca", "umap", "tsne"
 
 # ===================== 自动路径管理 =====================
 OUTDIR = os.path.join(RUN_NAME)
@@ -192,3 +192,41 @@ pdf.output(PDF_PATH)
 torch.save(model.state_dict(), MODEL_PATH)
 print(f"✅ 模型保存至: {MODEL_PATH}")
 
+# ===================== 梯度分析 =====================
+print("🔍 开始梯度分析...")
+
+model.eval()
+X_tensor = torch.tensor(features_df.values, dtype=torch.float32, requires_grad=True).to(device)
+embeddings = model.encoder(X_tensor)  # [n_samples, embedding_dim]
+
+# 使用简单方式：计算每个样本与平均 embedding 的距离平方和
+avg_embedding = embeddings.mean(dim=0, keepdim=True)
+distances = torch.norm(embeddings - avg_embedding, dim=1).pow(2).sum()
+distances.backward()
+
+# 获取梯度
+grads = X_tensor.grad.cpu().numpy()
+avg_grad = grads.mean(axis=0)
+
+# 构建 DataFrame 保存
+grad_df = pd.DataFrame({
+    "feature": features_df.columns,
+    "avg_gradient": avg_grad
+})
+grad_df["abs_gradient"] = grad_df["avg_gradient"].abs()
+grad_df = grad_df.sort_values("abs_gradient", ascending=False)
+grad_csv_path = os.path.join(OUTDIR, "feature_gradient_importance.csv")
+grad_df.to_csv(grad_csv_path, index=False)
+print(f"📊 梯度重要性已保存至: {grad_csv_path}")
+
+# 绘制前20特征的柱状图
+top_n = 15
+top_grad_df = grad_df.head(top_n)
+plt.figure(figsize=(8, 5))
+plt.barh(top_grad_df["feature"][::-1], top_grad_df["abs_gradient"][::-1])
+plt.xlabel("Average Absolute Gradient")
+plt.title(f"Top {top_n} Most Influential Features")
+plt.tight_layout()
+grad_plot_path = os.path.join(OUTDIR, "feature_gradient_barplot.png")
+plt.savefig(grad_plot_path)
+print(f"📈 梯度图保存至: {grad_plot_path}")
