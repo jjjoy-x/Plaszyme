@@ -6,6 +6,8 @@ import pandas as pd
 import itertools
 from torch.utils.data import Dataset, DataLoader
 from sklearn.decomposition import PCA
+from sklearn.manifold import TSNE
+import umap
 import matplotlib.pyplot as plt
 import imageio
 import cv2
@@ -14,7 +16,7 @@ from fpdf import FPDF
 from plastic.mol_features.descriptors_rdkit import PlasticFeaturizer
 
 # ===================== 用户配置 =====================
-RUN_NAME = "run/run_from_sdf_2"
+RUN_NAME = "run/run_from_sdf_4"
 SDF_DIR = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf"
 CONFIG_PATH = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mol_features/rdkit_features.yaml"
 CO_MATRIX_CSV = "/Users/shulei/PycharmProjects/Plaszyme/test/outputs/plastic_co_matrix.csv"
@@ -26,6 +28,7 @@ BATCH_SIZE = 16
 EPOCHS = 200
 LR = 1e-4
 PLOT_INTERVAL = 5
+REDUCTION_METHOD = "pca" # 降维方式可选: "pca", "umap", "tsne"
 
 # ===================== 自动路径管理 =====================
 OUTDIR = os.path.join(RUN_NAME)
@@ -105,19 +108,29 @@ class ContrastiveLoss(nn.Module):
                (1 - label.squeeze()) * torch.pow(torch.clamp(self.margin - dist, min=0.0), 2)
         return loss.mean()
 
+def reduce_embeddings(embeddings, method="pca", random_state=42):
+    if method == "pca":
+        return PCA(n_components=2).fit_transform(embeddings)
+    elif method == "umap":
+        return umap.UMAP(n_components=2, random_state=random_state).fit_transform(embeddings)
+    elif method == "tsne":
+        return TSNE(n_components=2, random_state=random_state, perplexity=5).fit_transform(embeddings)
+    else:
+        raise ValueError(f"Unsupported reduction method: {method}")
+
 # ===================== 可视化函数 =====================
 def plot_embeddings(model, features_df, epoch, save_dir):
     model.eval()
     with torch.no_grad():
         X = torch.tensor(features_df.values, dtype=torch.float32)
         embeddings = model.encoder(X).numpy()
-        reduced = PCA(n_components=2).fit_transform(embeddings)
+        reduced = reduce_embeddings(embeddings, method=REDUCTION_METHOD)
 
         plt.figure(figsize=(6, 5))
         for i, name in enumerate(features_df.index):
             plt.scatter(reduced[i, 0], reduced[i, 1])
             plt.text(reduced[i, 0], reduced[i, 1], name, fontsize=7)
-        plt.title(f"Epoch {epoch}")
+        plt.title(f"{REDUCTION_METHOD.upper()} - Epoch {epoch}")
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, f"epoch_{epoch:03d}.png"))
         plt.close()
