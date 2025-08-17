@@ -63,16 +63,16 @@ class PlasticFeaturizer:
         all_descriptors = [desc[0] for desc in Descriptors._descList]
         descriptor_names = self.config.get("descriptor_names", [])
 
-        # 处理None的情况：使用全部标准描述符
-        if descriptor_names is None:
-            logger.info("配置中descriptor_names为None，使用全部标准RDKit描述符")
-            return all_descriptors
+        # ✅ 默认排除的描述符（只在 descriptor_names 为 None 或 [] 时生效）
+        exclude_by_default = {"Ipc"}
 
-        # 如果是空列表，也使用全部描述符
-        if not descriptor_names:
-            logger.info("配置中descriptor_names为空，使用全部标准RDKit描述符")
-            return all_descriptors
+        if descriptor_names is None or descriptor_names == []:
+            filtered = [d for d in all_descriptors if d not in exclude_by_default]
+            logger.info(
+                f"descriptor_names 为 {descriptor_names}，默认使用全部 RDKit 描述符，已排除: {sorted(exclude_by_default)}")
+            return filtered
 
+        # ✅ 显式配置时，严格按用户要求保留，即使包含不推荐的也不排除
         return [d for d in descriptor_names if d in all_descriptors]
 
     def _get_fragment_descriptors(self) -> List[str]:
@@ -85,7 +85,7 @@ class PlasticFeaturizer:
 
         # 处理None的情况
         if descriptor_names is None:
-            return []  # 如果没有配置具体描述符，不使用官能团特征
+            return available_fragments
 
         return [d for d in descriptor_names if d in available_fragments]
 
@@ -96,7 +96,7 @@ class PlasticFeaturizer:
 
         # 处理None的情况
         if descriptor_names is None:
-            return []  # 如果没有配置具体描述符，不使用电荷特征
+            return available_charges
 
         return [d for d in descriptor_names if d in available_charges]
 
