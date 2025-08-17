@@ -24,14 +24,14 @@ class DeepFRIModel(nn.Module):
     """
 
     def __init__(
-        self,
-        gnn_type: str,
-        gnn_dims: list[int],
-        fc_dims: list[int],
-        out_dim: int,
-        dropout: float = 0.3,
-        use_residue_level_output: bool = False,
-        in_dim: Optional[int] = None,
+            self,
+            gnn_type: str,
+            gnn_dims: list[int],
+            fc_dims: list[int],
+            out_dim: int,
+            dropout: float = 0.3,
+            use_residue_level_output: bool = False,
+            in_dim: Optional[int] = None,
     ):
         super(DeepFRIModel, self).__init__()
         self.in_dim = in_dim
@@ -42,6 +42,10 @@ class DeepFRIModel(nn.Module):
         self.dropout_p = dropout
         self.use_residue_level_output = use_residue_level_output
         self._built = False
+
+        # ✅ 如果 in_dim 已给定，则立即构建
+        if self.in_dim is not None:
+            self._build_layers(self.in_dim)
 
     def _get_gnn_layer(self, in_dim, out_dim):
         if self.gnn_type_str == 'gcn':
