@@ -1,0 +1,3 @@
+[submodule "projects/HMM-functional-annotator"]
+	path = projects/HMM-functional-annotator
+	url = git@github.com:jjjoy-x/HMM-functional-annotator.git
