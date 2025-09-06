@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Tuple, List
+from typing import Any, Dict, Optional, Tuple, List, Union, Sequence
 
 import numpy as np
 import pandas as pd
@@ -48,14 +48,15 @@ class BuilderConfig:
             指定链 ID；None 则取首链。
         radius (float): Distance cutoff (Å) for edge building (used by subclasses).
             构边半径阈值（Å），子类使用。
-        embedder (Dict[str, Any]): Sequence embedder spec, e.g. {"name":"esm", ...}.
-            序列嵌入器配置（示例：{"name":"esm", ...}）。
+        embedder (Union[Dict[str, Any], List[Dict[str, Any]]]): Sequence embedder spec.
+            序列嵌入器配置；可为单个字典（如 {"name":"esm", ...}），
+            也可为多个配置的列表（将按顺序拼接特征）。
     """
     pdb_dir: str
     out_dir: str
     chain_id: Optional[str] = None
     radius: float = 10.0
-    embedder: Dict[str, Any] = None
+    embedder: Union[Dict[str, Any], List[Dict[str, Any]], None] = None
 
 
 # =============================================================================
@@ -225,16 +226,15 @@ def _align_seq_full_and_atom(seq_full: str, seq_atom: str) -> Dict[str, Any]:
 
 
 # =============================================================================
-# Simple embedder factory  内置嵌入器工厂
+# Simple embedder factory  内置嵌入器工厂（支持单个或多个）
 # =============================================================================
 
-def _create_embedder(name: str = "esm", **kwargs) -> Any:
-    """Create a residue-level embedder by name.
-
-    根据名称创建残基级嵌入器。支持 "esm" / "onehot" / "physchem"。
+def _create_single_embedder(name: str = "esm", **kwargs) -> Any:
+    """Create one residue-level embedder by name.
+    根据名称创建单个残基级嵌入器。支持 "esm" / "onehot" / "physchem"
 
     Args:
-        name: Embedder name.
+        name: Embedder name support list.
         **kwargs: Forwarded to the embedder constructor.
 
     Returns:
@@ -248,6 +248,81 @@ def _create_embedder(name: str = "esm", **kwargs) -> Any:
     if name == "physchem":
         return PhysChemEmbedder(**kwargs)
     raise ValueError(f"Unknown embedder name: {name}")
+
+
+class _CompositeEmbedder:
+    """Concatenate multiple residue embedders along feature dim.
+
+    把多个嵌入器在特征维拼接：单序列输入返回 [L, ΣD_i]；
+    多序列输入则返回 List[[L, ΣD_i]]。
+    """
+
+    def __init__(self, embedders: Sequence[Any]):
+        assert len(embedders) >= 1, "CompositeEmbedder needs at least one sub-embedder."
+        self.embedders = list(embedders)
+        # 对齐 device 到第一个（假设都已各自处理好）
+        self.device = getattr(self.embedders[0], "device", "cpu")
+
+    @property
+    def dim(self) -> int:
+        return int(sum(getattr(e, "dim", 0) for e in self.embedders))
+
+    def info_str(self) -> str:
+        parts = [e.__class__.__name__ for e in self.embedders]
+        return "[CompositeEmbedder] " + " + ".join(parts)
+
+    def embed(self, sequences: Union[str, Sequence[str]]):
+        # 单条序列：直接拼接
+        if isinstance(sequences, str):
+            xs = [e.embed(sequences) for e in self.embedders]  # each [L, D_i]
+            return torch.cat(xs, dim=-1)
+
+        # 多条序列：逐条拼接，保持返回 List[Tensor]
+        outs: List[torch.Tensor] = []
+        for s in sequences:
+            xs = [e.embed(s) for e in self.embedders]
+            outs.append(torch.cat(xs, dim=-1))
+        return outs
+
+
+def _create_embedder(embedder_cfg: Union[Dict[str, Any], List[Dict[str, Any]], None]) -> Any:
+    """Create residue embedder(s) from config.
+
+    支持：
+      - 单个 dict：{"name":"esm", ...}
+      - 列表 [ {...}, {...} ]：按顺序创建多个，再拼接
+      - None：默认 onehot
+    """
+    if embedder_cfg is None:
+        return _CompositeEmbedder([_create_single_embedder("onehot")])
+
+    # 列表 → 复合
+    if isinstance(embedder_cfg, (list, tuple)):
+        embedders = []
+        for cfg in embedder_cfg:
+            cfg = dict(cfg or {})
+            name = (cfg.pop("name", "onehot") or "onehot")
+            embedders.append(_create_single_embedder(name, **cfg))
+        comp = _CompositeEmbedder(embedders)
+        try:
+            print(comp.info_str())
+        except Exception:
+            pass
+        return comp
+
+    # 单个 dict → 单嵌入器（仍包成 composite，便于 dim/行为一致）
+    if isinstance(embedder_cfg, dict):
+        cfg = dict(embedder_cfg)
+        name = (cfg.pop("name", "onehot") or "onehot")
+        emb = _create_single_embedder(name, **cfg)
+        comp = _CompositeEmbedder([emb])
+        try:
+            print(comp.info_str())
+        except Exception:
+            pass
+        return comp
+
+    raise TypeError(f"Unsupported embedder config type: {type(embedder_cfg)}")
 
 
 # =============================================================================
@@ -269,7 +344,8 @@ class BaseProteinGraphBuilder:
         """
         self.cfg = cfg
         os.makedirs(self.cfg.out_dir, exist_ok=True)
-        self.embedder = _create_embedder(**(self.cfg.embedder or {}))
+        # NEW: 支持单个或多个 embedder，并在内部拼接。
+        self.embedder = _create_embedder(self.cfg.embedder)
 
     # ---------- Public API ----------
     def build_folder(self) -> None:

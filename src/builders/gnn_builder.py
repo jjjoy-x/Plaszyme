@@ -155,7 +155,11 @@ if __name__ == "__main__":
     cfg = BuilderConfig(
         pdb_dir=os.path.dirname(pdb_file),
         out_dir=out_dir,
-        embedder={"name": "physchem"},  # 可改 "esm" / "physchem"
+        embedder=[
+            {"name": "physchem", "norm": "zscore", "concat_onehot": True},
+            {"name": "onehot"},
+            {"name": "esm", "model_name": "esm2_t12_35M_UR50D", "fp16": False},
+        ],
     )
 
     # 1) 纯二值
@@ -163,13 +167,3 @@ if __name__ == "__main__":
     name = os.path.splitext(os.path.basename(pdb_file))[0]
     data_bin, misc = builder_bin.build_one(pdb_file, name=name)
     print(f"[BINARY] edge_attr? {'edge_attr' in data_bin}")
-
-    # 2) 距离标量
-    builder_dist = GNNProteinGraphBuilder(cfg, edge_mode="dist")
-    data_dist, _ = builder_dist.build_one(pdb_file, name=name)
-    print(f"[DIST] edge_attr={tuple(data_dist.edge_attr.shape)} (expect [E,1])")
-
-    # 3) RBF
-    builder_rbf = GNNProteinGraphBuilder(cfg, edge_mode="rbf")
-    data_rbf, _ = builder_rbf.build_one(pdb_file, name=name)
-    print(f"[RBF] edge_attr={tuple(data_rbf.edge_attr.shape)} (expect [E,K])")
