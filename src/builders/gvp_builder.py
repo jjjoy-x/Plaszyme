@@ -7,6 +7,7 @@ GVP 构建器：节点包含 x_s:[K,Ds] 与 x_v:[K,Vn,3]（默认 CA→N、CA→
 """
 
 from __future__ import annotations
+
 import os
 from typing import Dict, Literal, Optional
 

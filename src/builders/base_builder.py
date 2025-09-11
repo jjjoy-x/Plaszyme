@@ -166,66 +166,6 @@ def _parse_pdb_single_chain(pdb_path: str, chain_id: Optional[str]) -> Dict[str,
 
 
 # =============================================================================
-# Simplified alignment  简化序列对齐（前后缀裁剪）
-# =============================================================================
-
-def _align_seq_full_and_atom(seq_full: str, seq_atom: str) -> Dict[str, Any]:
-    """Align full sequence (SEQRES) and observed ATOM sequence by prefix/suffix trimming.
-
-    简化对齐策略：裁剪公共前缀与后缀，并对中段按较短序列对齐。适合 AlphaFold/多数标准 PDB。
-    若差异较大，建议替换为 Needleman–Wunsch 全局对齐（仅需改此函数）。
-
-    Args:
-        seq_full: Full sequence (SEQRES or ATOM fallback).
-        seq_atom: Observed sequence from ATOM.
-
-    Returns:
-        Dict[str, Any]: {
-            "L_full": int,
-            "kept_idx": np.ndarray[K],           # indices into full sequence
-            "seq_to_atom_idx": np.ndarray[L_full],  # -1 if not observed
-            "atom_kept_mask": np.ndarray[La],    # mask in atom seq kept
-        }
-    """
-    Lf, La = len(seq_full), len(seq_atom)
-    if seq_full == seq_atom:
-        kept_idx = np.arange(Lf, dtype=int)
-        return {
-            "L_full": Lf,
-            "kept_idx": kept_idx,
-            "seq_to_atom_idx": np.arange(Lf, dtype=int),
-            "atom_kept_mask": np.ones(La, dtype=bool),
-        }
-
-    # trim common prefix
-    i0 = 0
-    while i0 < min(Lf, La) and seq_full[i0] == seq_atom[i0]:
-        i0 += 1
-    # trim common suffix
-    j0 = 0
-    while j0 < min(Lf - i0, La - i0) and seq_full[Lf - 1 - j0] == seq_atom[La - 1 - j0]:
-        j0 += 1
-
-    mid = max(0, min(Lf - i0, La - i0) - j0)
-    kept_idx = np.arange(i0, i0 + mid, dtype=int)
-
-    seq_to_atom = np.full(Lf, -1, dtype=int)
-    atom_kept_mask = np.zeros(La, dtype=bool)
-    for k in range(mid):
-        pos_f = i0 + k
-        pos_a = i0 + k
-        seq_to_atom[pos_f] = pos_a
-        atom_kept_mask[pos_a] = True
-
-    return {
-        "L_full": Lf,
-        "kept_idx": kept_idx,
-        "seq_to_atom_idx": seq_to_atom,
-        "atom_kept_mask": atom_kept_mask,
-    }
-
-
-# =============================================================================
 # Simple embedder factory  内置嵌入器工厂（支持单个或多个）
 # =============================================================================
 
@@ -274,7 +214,18 @@ class _CompositeEmbedder:
     def embed(self, sequences: Union[str, Sequence[str]]):
         # 单条序列：直接拼接
         if isinstance(sequences, str):
-            xs = [e.embed(sequences) for e in self.embedders]  # each [L, D_i]
+            xs = []
+            for e in self.embedders:
+                x = e.embed(sequences)  # [L, D_i]
+                if not torch.is_floating_point(x):
+                    x = x.float()  # 统一 float
+                x = x.to(self.device, non_blocking=True)  # 统一 device（cuda:0 / cpu）
+                xs.append(x)
+
+            L = [t.size(0) for t in xs]
+            if len(set(L)) != 1:
+                raise RuntimeError(f"[SequenceEmbedder] Length mismatch across embedders: {L}")
+
             return torch.cat(xs, dim=-1)
 
         # 多条序列：逐条拼接，保持返回 List[Tensor]
@@ -370,60 +321,91 @@ class BaseProteinGraphBuilder:
         pd.DataFrame(rows).to_csv(os.path.join(self.cfg.out_dir, "manifest.csv"), index=False)
 
     def build_one(self, pdb_path: str, name: Optional[str] = None) -> Tuple[Data, Dict[str, Any]]:
-        """Build one PyG graph from a PDB.
-
-        从单个 PDB 构建 PyG 图。
-
-        Args:
-            pdb_path: Path to PDB.
-            name: Optional sample name (default: file stem).
-
-        Returns:
-            Tuple[Data, Dict[str, Any]]: (graph, misc for manifest).
+        """
+        ATOM-only 构图：
+          - 节点：ATOM 可见且含 CA 的标准残基
+          - 序列：直接使用 ATOM 序列（seq_atom），恒等对齐
+          - 边：对 kept 的 CA 坐标做半径图（由子类实现细节）
         """
         if name is None:
             name = os.path.splitext(os.path.basename(pdb_path))[0]
 
-        # 1) parse PDB
+        # 1) 解析（单链；已过滤 HET/WAT，只保留标准残基）
         parsed = _parse_pdb_single_chain(pdb_path, self.cfg.chain_id)
 
-        # 2) choose full sequence (SEQRES preferred; fallback to ATOM)
-        seq_full = parsed["seq_full"] if parsed["seq_full"] else parsed["seq_atom"]
-        warn = "" if parsed["seq_full"] else "no_seqres_fallback_atom"
+        # --- 基本健壮性检查 ---
+        ca = parsed["coords_CA"]
+        if not (isinstance(ca, np.ndarray) and ca.ndim == 2 and ca.shape[1] == 3):
+            raise ValueError(f"[{name}] Bad coords_CA shape: {getattr(ca, 'shape', None)}")
 
-        # 3) simplified alignment
-        aln = _align_seq_full_and_atom(seq_full, parsed["seq_atom"])
+        K = int(ca.shape[0])
+        if K == 0:
+            # 没有任何可见 CA（如核酸链/异常 PDB）——上游可选择捕获并跳过
+            raise ValueError(f"[{name}] no_visible_CA")
 
-        # 4) delegate node features
+        # 2) 节点集合 = 全部 ATOM 可见残基；序列直接用 ATOM
+        kept_idx = np.arange(K, dtype=int)  # 0..K-1
+        seq_text = parsed.get("seq_atom", "")  # 长度应为 K
+        atom_kept_mask = np.ones(K, dtype=bool)  # 记录用
+
+        # 3) 子类生成节点/边特征
+        #    节点：传 ATOM 序列 + kept_idx
         node_feats = self._build_node_features(
-            seq_full=seq_full,
-            kept_idx=aln["kept_idx"],
-            parsed=parsed,     # includes coords and res_ids
+            seq_full=seq_text,
+            kept_idx=kept_idx,
+            parsed=parsed,
         )
 
-        # 5) delegate edges (use kept CA coords)
-        coords_ca_kept = parsed["coords_CA"][aln["atom_kept_mask"]]
-        edge_feats = self._build_edges(coords_ca_kept, parsed=parsed, aln=aln)
+        #    边：对 kept 的 CA 做半径图
+        coords_ca_kept = parsed["coords_CA"][kept_idx]  # [K,3]
+        if not (isinstance(coords_ca_kept, np.ndarray) and coords_ca_kept.ndim == 2 and coords_ca_kept.shape[1] == 3):
+            coords_ca_kept = np.asarray(coords_ca_kept, dtype=float).reshape(-1, 3)
 
-        # 6) assemble Data
-        data = Data()
+        edge_feats = self._build_edges(coords_ca_kept, parsed=parsed, aln={
+            "L_full": K,
+            "kept_idx": kept_idx,
+            "seq_to_atom_idx": np.arange(K, dtype=int),  # 恒等对齐
+            "atom_kept_mask": atom_kept_mask,
+        })
+
+        # 4) 组装 Data
+        feats: Dict[str, torch.Tensor] = {}
+        feats.update(node_feats)
+        feats.update(edge_feats)
+        data = Data(**feats)
         data.name = name
-        # alignment meta
-        data.L_full = int(aln["L_full"])
-        data.kept_idx = torch.as_tensor(aln["kept_idx"], dtype=torch.long)
-        data.seq_to_atom_idx = torch.as_tensor(aln["seq_to_atom_idx"], dtype=torch.long)
-        data.res_ids = parsed["res_ids"]  # list[str] for debugging/inspection
 
-        # subclass fields
-        for k, v in {**node_feats, **edge_feats}.items():
-            data[k] = v
+        # num_nodes 推断
+        if "x_s" in feats and isinstance(feats["x_s"], torch.Tensor):
+            data.num_nodes = int(feats["x_s"].size(0))
+        elif "x" in feats and isinstance(feats["x"], torch.Tensor):
+            data.num_nodes = int(feats["x"].size(0))
+        elif "edge_index" in feats and isinstance(feats["edge_index"], torch.Tensor) and feats[
+            "edge_index"].numel() > 0:
+            data.num_nodes = int(feats["edge_index"].max().item() + 1)
+        else:
+            data.num_nodes = K
 
+        # res_ids 与 kept 对齐
+        all_res_ids: List[str] = parsed.get("res_ids", [])
+        if isinstance(all_res_ids, list) and len(all_res_ids) == K:
+            data.res_ids = [all_res_ids[i] for i in kept_idx]
+        else:
+            ch = (all_res_ids[0].split(":")[0] if all_res_ids else (self.cfg.chain_id or "A"))
+            data.res_ids = [f"{ch}:{i + 1}" for i in range(K)]
+
+        # 记录元信息（调试用）
+        data.L_full = K
+        data.kept_idx = torch.as_tensor(kept_idx, dtype=torch.long)
+        data.seq_to_atom_idx = torch.arange(K, dtype=torch.long)
+
+        # manifest 信息
         misc = {
             "pdb_path": pdb_path,
-            "seq_full_len": aln["L_full"],
-            "seq_atom_len": len(parsed["seq_atom"]),
-            "kept_len": len(aln["kept_idx"]),
-            "warn": warn,
+            "seq_full_len": 0,  # 不再使用 SEQRES
+            "seq_atom_len": len(seq_text),  # 应与 K 一致
+            "kept_len": K,
+            "warn": "atom_only",
         }
         return data, misc
 

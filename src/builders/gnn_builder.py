@@ -11,7 +11,7 @@ GNN 构建器：节点只有标量特征 x；
 """
 
 from __future__ import annotations
-import os
+
 from typing import Dict, Literal, Optional
 
 import numpy as np
