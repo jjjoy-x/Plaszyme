@@ -12,9 +12,6 @@ import torch
 from torch.utils.data import Dataset
 from torch_geometric.data import Data as PyGData, Batch
 
-from src.plastic.descriptors_rdkit import PlasticFeaturizer
-from src.builders.gnn_builder import GNNProteinGraphBuilder
-
 Split = Literal["train", "val", "test"]
 Mode = Literal["point", "pair", "list"]
 
@@ -94,9 +91,9 @@ class PairedPlaszymeDataset(Dataset):
         # 负样本策略（point/pair/list 通用或部分使用）
         neg_ratio: float = 1.0,          # point: 每个正样本配多少倍负样本（从当前行内0列随机采）
         max_list_len: int = 16,          # list: 每个 enzyme 采样的塑料总数上限（含正+负）
-        # 构建器
-        enzyme_builder = PlasticFeaturizer,             # 需要实现 .build(pdb_path, chain_id=None) -> PyGData
-        plastic_featurizer = GNNProteinGraphBuilder,         # 需要实现 .featurize_file(sdf_path) -> Tensor[D]
+        # 构建器（传入实例！）
+        enzyme_builder: Any = None,      # 需要实现 .build_one(pdb_path, name=...) -> (PyGData, misc)
+        plastic_featurizer: Any = None,  # 需要实现 .featurize_file(sdf_path) -> Tensor[D] 或 None
         # 链ID映射（可选）
         chain_map: Optional[Dict[str, str]] = None,  # {pdb_basename: chain_id}
     ):
@@ -104,8 +101,13 @@ class PairedPlaszymeDataset(Dataset):
         assert mode in ("point", "pair", "list")
         self.mode = mode
         self.matrix_spec = matrix
+
+        # 要求传入实例，避免循环依赖
+        if enzyme_builder is None or plastic_featurizer is None:
+            raise ValueError("请传入 enzyme_builder 实例 与 plastic_featurizer 实例。")
         self.enzyme_builder = enzyme_builder
         self.plastic_featurizer = plastic_featurizer
+
         self.neg_ratio = float(neg_ratio)
         self.max_list_len = int(max_list_len)
         self.chain_map = chain_map or {}
@@ -177,6 +179,10 @@ class PairedPlaszymeDataset(Dataset):
         # 简单内存缓存（跨 epoch 复用）
         self._cache_graph: Dict[str, PyGData] = {}
         self._cache_plastic: Dict[str, torch.Tensor] = {}
+        self._missing_sdf_warned: set[str] = set()
+        self._failed_feat_warned: set[str] = set()
+        self._missing_sdf_count: int = 0
+        self._failed_feat_count: int = 0
 
     def __len__(self) -> int:
         if self.mode in ("point", "pair"):
@@ -196,11 +202,10 @@ class PairedPlaszymeDataset(Dataset):
         pdb_path = self._pdb_path(pdb_name)
         if not os.path.isfile(pdb_path):
             raise FileNotFoundError(pdb_path)
-        chain_id = self.chain_map.get(pdb_name)
         name = os.path.splitext(os.path.basename(pdb_path))[0]
         g, _ = self.enzyme_builder.build_one(pdb_path, name=name)
         if not isinstance(g, PyGData):
-            raise TypeError("enzyme_builder.build 必须返回 PyG Data")
+            raise TypeError("enzyme_builder.build_one 必须返回 (PyG Data, misc)")
         self._cache_graph[pdb_name] = g
         return g
 
@@ -210,15 +215,23 @@ class PairedPlaszymeDataset(Dataset):
 
         sdf_path = self._sdf_path(sdf_name)
         if not os.path.isfile(sdf_path):
-            warnings.warn(f"[PairedPlaszymeDataset] ⚠️ 缺失 SDF 文件: {sdf_path}，跳过该样本")
+            # 同一个缺失文件仅告警一次，并计数
+            if sdf_path not in self._missing_sdf_warned:
+                warnings.warn(f"[PairedPlaszymeDataset] ⚠️ 缺失 SDF 文件: {sdf_path}，跳过该样本")
+                self._missing_sdf_warned.add(sdf_path)
+            self._missing_sdf_count += 1
             return None
 
         f = self.plastic_featurizer.featurize_file(sdf_path)
         if f is None:
-            warnings.warn(f"[PairedPlaszymeDataset] ⚠️ 特征提取失败: {sdf_path}，跳过该样本")
+            # 同一个失败文件仅告警一次，并计数
+            if sdf_path not in self._failed_feat_warned:
+                warnings.warn(f"[PairedPlaszymeDataset] ⚠️ 特征提取失败: {sdf_path}，跳过该样本")
+                self._failed_feat_warned.add(sdf_path)
+            self._failed_feat_count += 1
             return None
 
-        f = f.view(1, -1)
+        f = f.view(1, -1)  # 统一 [1, D]
         self._cache_plastic[sdf_name] = f
         return f
 
@@ -228,6 +241,7 @@ class PairedPlaszymeDataset(Dataset):
             pdb_name, sdf_name, y = self.samples[idx]
             g = self._get_graph(pdb_name)
             f = self._get_plastic(sdf_name)
+            # 保持简单：返回 None 让 collate 过滤
             return {"mode": "point", "pdb_name": pdb_name, "sdf_name": sdf_name,
                     "enzyme_graph": g, "plastic_feat": f, "label": torch.tensor([y], dtype=torch.float32)}
 
@@ -247,24 +261,40 @@ class PairedPlaszymeDataset(Dataset):
         pos_cols = [s for s in self.cols if self.labels[(pdb_name, s)] == 1]
         neg_cols = [s for s in self.cols if self.labels[(pdb_name, s)] == 0]
 
-        # 裁剪/采样：最多保留 max_list_len，总是优先保留所有正样本
-        plastics: List[torch.Tensor] = []
-        rels: List[float] = []
+        # 收集成 (feat_tensor, label_float) 对，最后统一过滤 None
+        pairs: List[Tuple[Optional[torch.Tensor], float]] = []
 
+        # 先放正样本（尽量全保留）
         for s in pos_cols:
-            plastics.append(self._get_plastic(s))
-            rels.append(1.0)
+            f = self._get_plastic(s)
+            pairs.append((f, 1.0))
 
-        k_neg = max(0, self.max_list_len - len(plastics))
+        # 再采负样本：最多补到 max_list_len
+        k_neg = max(0, self.max_list_len - sum(1 for f, _ in pairs if f is not None))
         if k_neg > 0 and len(neg_cols) > 0:
             random.shuffle(neg_cols)
-            for s in neg_cols[:k_neg]:
-                plastics.append(self._get_plastic(s))
-                rels.append(0.0)
+            taken = 0
+            for s in neg_cols:
+                if taken >= k_neg:
+                    break
+                f = self._get_plastic(s)
+                if f is None:
+                    continue
+                pairs.append((f, 0.0))
+                taken += 1
 
-        # [L, D]
-        plast_feat = torch.cat(plastics, dim=0) if len(plastics) > 0 else torch.empty(0, 0)
-        labels = torch.tensor(rels, dtype=torch.float32)
+        # 过滤掉 None
+        pairs = [(f, y) for (f, y) in pairs if f is not None]
+
+        if len(pairs) == 0:
+            # 空样本；训练脚本应在看到长度 0 时跳过
+            plast_feat = torch.empty(0, 0)
+            labels = torch.empty(0, dtype=torch.float32)
+        else:
+            plastics = [f for (f, _) in pairs]                  # list of [1, D]
+            rels     = [y for (_, y) in pairs]                  # list of float
+            plast_feat = torch.cat(plastics, dim=0)             # [L, D]
+            labels    = torch.tensor(rels, dtype=torch.float32) # [L]
 
         return {"mode": "list", "pdb_name": pdb_name, "enzyme_graph": g,
                 "plastic_list": plast_feat, "relevance": labels}
@@ -276,9 +306,22 @@ def collate_pairs(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     通用 collate：
       - 将多个 PyG Data -> Batch
       - 将塑料特征按模式堆叠
+      - 对 point/pair 模式：在 collate 阶段过滤 None（缺失/失败）
     """
     assert len(batch) > 0
     mode: Mode = batch[0]["mode"]
+
+    # 先按模式过滤掉含 None 的条目
+    if mode == "point":
+        batch = [b for b in batch if b.get("plastic_feat", None) is not None]
+    elif mode == "pair":
+        batch = [b for b in batch if (b.get("plastic_pos", None) is not None and b.get("plastic_neg", None) is not None)]
+    else:
+        # listwise：各样本内部已自行过滤 None，这里不动
+        pass
+
+    if len(batch) == 0:
+        raise ValueError("[collate_pairs] 本批次有效样本为 0（均因缺失/解析失败被过滤）。")
 
     # 酶图
     g_list = [b["enzyme_graph"] for b in batch]
