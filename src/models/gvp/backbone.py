@@ -39,7 +39,7 @@ class GVPBackbone(nn.Module):
     使用官方 gvp_local.GVPConvLayer 堆叠的主干。
 
     Args:
-        hidden_dims: (S_hidden, V_hidden)，每层节点隐藏的标量/向量通道数
+        hidden_dims: Tuple[int,int] 或 List[Tuple[int,int]]，每层节点隐藏的标量/向量通道数
         n_layers: 堆叠多少个 GVPConvLayer（残差层，节点维不变）
         out_dim: 输出维度（图级或残基级）
         dropout: Dropout 概率
@@ -51,9 +51,9 @@ class GVPBackbone(nn.Module):
     """
     def __init__(
         self,
-        hidden_dims: Tuple[int, int] = (128, 16),
-        n_layers: int = 3,
-        out_dim: int = 1,
+        hidden_dims=(128, 16),  # 可为 (S_h, V_h) 或 [(64,8),(96,12),(128,16)]
+        n_layers: int = 3,      # 当 hidden_dims 是元组时生效；是列表时忽略
+        out_dim: int = 128,
         dropout: float = 0.1,
         residue_logits: bool = False,
         *,
@@ -63,9 +63,6 @@ class GVPBackbone(nn.Module):
         n_feedforward: int = 2,
     ) -> None:
         super().__init__()
-        self.S_h, self.V_h = hidden_dims
-        self.n_layers = int(n_layers)
-        self.out_dim = int(out_dim)
         self.dropout_p = float(dropout)
         self.residue_logits = bool(residue_logits)
 
@@ -74,15 +71,21 @@ class GVPBackbone(nn.Module):
         self.n_message = int(n_message)
         self.n_feedforward = int(n_feedforward)
 
-        # 懒构建：首个 batch 自动探测 (S_in,V_in) 和 (Se,Ve)
+        # 统一成 per-layer 维度列表 dims_list
+        if isinstance(hidden_dims[0], int):
+            # 单个元组 -> 重复 n_layers 次
+            S_h, V_h = hidden_dims
+            self.dims_list = [(S_h, V_h) for _ in range(int(n_layers))]
+        else:
+            # 列表[(S,V), (S,V), ...]
+            self.dims_list = [tuple(map(int, t)) for t in hidden_dims]
+
+        self.out_dim = int(out_dim)
         self._built = False
-
-        # 占位：实际在 _lazy_build 中创建
-        self.input_proj: Optional[nn.Module] = None
-        self.layers: Optional[nn.ModuleList] = None
-        self.node_head: Optional[nn.Module] = None
-        self.graph_head: Optional[nn.Module] = None
-
+        self.input_proj = None
+        self.blocks = None      # 交替 [opt_proj, conv, opt_proj, conv, ...]
+        self.node_head = None
+        self.graph_head = None
         self.dropout = nn.Dropout(self.dropout_p)
 
     # ---------- 内部：懒构建 ----------
@@ -93,54 +96,62 @@ class GVPBackbone(nn.Module):
         S_in = int(data.x_s.size(-1))
         V_in = int(data.x_v.size(-2))
         Se = int(getattr(data, "edge_s", torch.zeros(data.edge_index.size(1), 0, device=device)).size(-1))
-        if hasattr(data, "edge_v") and data.edge_v is not None:
-            Ve = int(data.edge_v.size(-2))
-        else:
-            Ve = 0
+        Ve = int(getattr(data, "edge_v", torch.zeros(data.edge_index.size(1), 0, 3, device=device)).size(-2))
 
-        node_in_dims = (S_in, V_in)
-        edge_in_dims = (Se, Ve)
-        node_hidden_dims = (self.S_h, self.V_h)
-
-        # 1) 可选的输入投影（把 (S_in,V_in) → (S_h,V_h)）
-        if (S_in, V_in) != node_hidden_dims:
+        # 输入投影到第一层维度
+        S0, V0 = self.dims_list[0]
+        if (S_in, V_in) != (S0, V0):
             self.input_proj = gvp_local.GVP(
-                in_dims=node_in_dims,
-                out_dims=node_hidden_dims,
+                in_dims=(S_in, V_in),
+                out_dims=(S0, V0),
                 activations=self.activations,
                 vector_gate=self.vector_gate,
             ).to(device)
-        else:
-            self.input_proj = None
 
-        # 2) 堆叠 n_layers 个官方 GVPConvLayer（每层输入输出维一致）
-        layers = []
-        for _ in range(self.n_layers):
-            layers.append(
+        edge_dims = (Se, Ve)
+        blocks = nn.ModuleList().to(device)
+        cur = (S0, V0)
+
+        for (S_h, V_h) in self.dims_list:
+            # 若上一层输出与本层要求不一致，先插入过渡 GVP
+            if cur != (S_h, V_h):
+                blocks.append(
+                    gvp_local.GVP(
+                        in_dims=cur,
+                        out_dims=(S_h, V_h),
+                        activations=self.activations,
+                        vector_gate=self.vector_gate,
+                    ).to(device)
+                )
+                cur = (S_h, V_h)
+            # 再放一层等维的 GVPConvLayer
+            blocks.append(
                 gvp_local.GVPConvLayer(
-                    node_dims=node_hidden_dims,
-                    edge_dims=edge_in_dims,
+                    node_dims=(S_h, V_h),
+                    edge_dims=edge_dims,
                     n_message=self.n_message,
                     n_feedforward=self.n_feedforward,
                     drop_rate=self.dropout_p,
                     activations=self.activations,
                     vector_gate=self.vector_gate,
-                )
+                ).to(device)
             )
-        self.layers = nn.ModuleList(layers).to(device)
+            cur = (S_h, V_h)
 
-        # 3) 读出头：只用标量通道（旋转不变）
+        self.blocks = blocks
+
+        # 读出：最后一层的标量通道维度
+        S_last, V_last = self.dims_list[-1]
         if self.residue_logits:
-            self.node_head = nn.Linear(self.S_h, self.out_dim).to(device)
+            self.node_head = nn.Linear(S_last, self.out_dim).to(device)
             self.graph_head = None
         else:
-            # 简单 MLP：S_h → S_h → out_dim
             self.node_head = None
             self.graph_head = nn.Sequential(
-                nn.Linear(self.S_h, self.S_h),
+                nn.Linear(S_last, S_last),
                 nn.ReLU(),
                 nn.Dropout(self.dropout_p),
-                nn.Linear(self.S_h, self.out_dim),
+                nn.Linear(S_last, self.out_dim),
             ).to(device)
 
         self._built = True
@@ -179,24 +190,17 @@ class GVPBackbone(nn.Module):
         if self.input_proj is not None:
             s, v = self.input_proj((s, v))
 
-        # 堆叠 GVPConvLayer
-        h_s, h_v = s, v
-        assert self.layers is not None
-        for layer in self.layers:
-            h_s, h_v = layer((h_s, h_v), edge_index, (e_s, e_v))
+        # 依次通过 blocks
+        for m in self.blocks:
+            if isinstance(m, gvp_local.GVPConvLayer):
+                s, v = m((s, v), data.edge_index, (e_s, e_v))
+            else:  # 过渡 GVP
+                s, v = m((s, v))
 
-        # 残基级或图级读出（只用标量通道）
         if self.residue_logits:
-            assert self.node_head is not None
-            return self.node_head(h_s)
+            return self.node_head(s)
 
-        # 图级：batch 不存在则默认全 0（单图）
-        if hasattr(data, "batch") and data.batch is not None:
-            batch = data.batch.to(h_s.device)
-        else:
-            batch = torch.zeros(h_s.size(0), dtype=torch.long, device=h_s.device)
-
-        assert self.graph_head is not None
-        g = global_mean_pool(h_s, batch)
-        g = self.graph_head(g)
-        return g
+        batch = data.batch if hasattr(data, "batch") and data.batch is not None \
+                else torch.zeros(s.size(0), dtype=torch.long, device=s.device)
+        g = global_mean_pool(s, batch)
+        return self.graph_head(g)
