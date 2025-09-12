@@ -16,16 +16,16 @@ from fpdf import FPDF
 from plastic.mol_features.descriptors_rdkit import PlasticFeaturizer
 
 # ===================== 用户配置 =====================
-RUN_NAME = "run/run_from_sdf_5"
-SDF_DIR = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf"
+RUN_NAME = "run/run_from_sdf_7"
+SDF_DIR = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf_new"
 CONFIG_PATH = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mol_features/rdkit_features.yaml"
 CO_MATRIX_CSV = "/Users/shulei/PycharmProjects/Plaszyme/test/outputs/plastic_co_matrix.csv"
 
-LOSS_MODE = "mse" #"mse" 或 "contrastive"
+LOSS_MODE = "contrastive" #"mse" 或 "contrastive"
 MARGIN = 1.5
 SIM_THRESHOLD = 0.01
 BATCH_SIZE = 16
-EPOCHS = 200
+EPOCHS = 500
 LR = 1e-4
 PLOT_INTERVAL = 5
 REDUCTION_METHOD = "tsne" # 降维方式可选: "pca", "umap", "tsne"

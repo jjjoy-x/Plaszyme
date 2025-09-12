@@ -5,8 +5,8 @@ from rdkit.Chem.Draw import rdMolDraw2D
 from rdkit.Chem.rdmolops import FindAllPathsOfLengthN
 
 # === 手动指定路径 ===
-INPUT_DIR  = "/plastic/mols_for_unimol_3"
-OUTPUT_DIR = "outputs/mol_main_chains"
+INPUT_DIR  = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf_new"
+OUTPUT_DIR = "/Users/shulei/PycharmProjects/Plaszyme/test/outputs/mol_main_chains1"
 
 # === 手动指定 config ===
 config = {
@@ -82,7 +82,7 @@ def visualize_main_chain(mol_path, config, out_path):
 def batch_process(input_dir, output_dir, config):
     os.makedirs(output_dir, exist_ok=True)
     for filename in os.listdir(input_dir):
-        if filename.endswith(".mol"):
+        if filename.endswith(".sdf"):
             mol_path = os.path.join(input_dir, filename)
             out_path = os.path.join(output_dir, f"{os.path.splitext(filename)[0]}_main_chain.png")
             visualize_main_chain(mol_path, config, out_path)

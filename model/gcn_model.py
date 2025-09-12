@@ -12,15 +12,6 @@ class DeepFRIModel(nn.Module):
     ----------------------------------------
     该模型结合 ESM 表达的节点特征与图神经网络（如 GCN 或 GAT），
     用于图级别或残基级别的蛋白质功能预测。
-
-    Args:
-        gnn_type (str): GNN 类型（支持 'gcn' 或 'gat'）
-        gnn_dims (List[int]): 每层 GNN 的输出维度
-        fc_dims (List[int]): 全连接层的每层维度
-        out_dim (int): 最终输出维度（例如类别数）
-        dropout (float): Dropout 概率，默认 0.3
-        use_residue_level_output (bool): 是否输出残基级预测（默认 False）
-        in_dim (Optional[int]): 输入特征维度，若为 None 将自动从输入推断
     """
 
     def __init__(
@@ -43,7 +34,7 @@ class DeepFRIModel(nn.Module):
         self.use_residue_level_output = use_residue_level_output
         self._built = False
 
-        # ✅ 如果 in_dim 已给定，则立即构建
+        # 若已给定 in_dim，则立即构建
         if self.in_dim is not None:
             self._build_layers(self.in_dim)
 
@@ -62,12 +53,14 @@ class DeepFRIModel(nn.Module):
         elif self.in_dim != detected_in_dim:
             print(f"[WARNING] Specified in_dim ({self.in_dim}) != input ({detected_in_dim}), using specified.")
 
+        # GNN 堆叠
         self.gnn_layers = nn.ModuleList()
         prev_dim = self.in_dim
         for out_dim in self.gnn_dims:
             self.gnn_layers.append(self._get_gnn_layer(prev_dim, out_dim))
             prev_dim = out_dim
 
+        # 读出 + 全连接
         self.readout = nn.Sequential(
             nn.Linear(sum(self.gnn_dims), self.fc_dims[0]),
             nn.ReLU(),
@@ -87,41 +80,49 @@ class DeepFRIModel(nn.Module):
         """
         Forward pass through GNN + Readout + Fully Connected layers
         前向传播：GNN + Pooling + FC 分类
-
-        Args:
-            data (Batch): PyG Batch 对象，包含 x (node features), edge_index (图结构), batch (图索引)
-
-        Returns:
-            Tensor: [B, out_dim] 图级输出 或 [N, out_dim] 残基级输出
         """
+        # 懒构建：用输入自动推断维度
         if not self._built:
-            self._build_layers(data.x.size(-1))  # 自动推断输入维度
+            self._build_layers(data.x.size(-1))
+            # 🔑 关键：新建完的层默认在 CPU，把整个模型迁移到输入所在设备
+            self.to(data.x.device)
 
         x, edge_index = data.x, data.edge_index
-        batch = data.batch if hasattr(data, 'batch') else torch.zeros(x.size(0), dtype=torch.long)
 
+        # 保证 edge_index 与 x 在同一设备（有些数据的 edge_index 仍在 CPU）
+        if edge_index.device != x.device:
+            edge_index = edge_index.to(x.device)
+
+        # 没有 batch 属性时，补一个，并放到同一设备
+        if hasattr(data, 'batch') and data.batch is not None:
+            batch = data.batch
+            if batch.device != x.device:
+                batch = batch.to(x.device)
+        else:
+            batch = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+
+        # 逐层 GNN
         gnn_outputs = []
         for layer in self.gnn_layers:
             x = layer(x, edge_index)
             gnn_outputs.append(x)
 
-        x = torch.cat(gnn_outputs, dim=-1)  # 拼接所有 GNN 层输出
+        # 拼接所有 GNN 层输出
+        x = torch.cat(gnn_outputs, dim=-1)
 
+        # 残基级输出
         if self.use_residue_level_output:
-            return self.output_layer(x)  # 返回残基级输出 [N, out_dim]
+            return self.output_layer(x)  # [N, out_dim]
 
-        # 图级别 readout（全局平均池化）
-        x = global_mean_pool(x, batch)  # [B, hidden_dim]
+        # 图级 readout + FC
+        x = global_mean_pool(x, batch)  # [B, hidden]
         x = self.readout(x)
         for layer in self.fc_layers:
             x = layer(x)
         return self.output_layer(x)  # [B, out_dim]
 
     def predict(self, data: Batch) -> torch.Tensor:
-        """
-        Wrapper for inference
-        推理接口，自动关闭 dropout 与梯度计算
-        """
+        """推理接口，自动关闭 dropout 与梯度计算"""
         self.eval()
         with torch.no_grad():
             return self.forward(data)

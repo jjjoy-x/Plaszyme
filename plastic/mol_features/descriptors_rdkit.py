@@ -323,9 +323,9 @@ class PlasticFeaturizer:
 # 测试代码
 if __name__ == "__main__":
     # 测试用的输入输出路径
-    INPUT_DIR = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol"  # 您的SDF/MOL文件夹
+    INPUT_DIR = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf_new"  # 您的SDF/MOL文件夹
     CONFIG_PATH = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mol_features/rdkit_features.yaml"  # 配置文件
-    OUTPUT_PREFIX = "/Users/shulei/PycharmProjects/Plaszyme/test/outputs/all_description"  # 输出前缀
+    OUTPUT_PREFIX = "/Users/shulei/PycharmProjects/Plaszyme/test/outputs/all_description_new_less"  # 输出前缀
 
     print("🧪 开始测试塑料特征提取器...")
 

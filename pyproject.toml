@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plaszyme"                   # 任意包名，仅用于pip识别
+version = "0.1.0"                   # 必填
+description = "Protein GNN/GVP models and builders"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "biopython",
+    "tqdm",
+    "torch>=2.0",
+    "torch-geometric>=2.5",
+            # 有些环境需要单独声明
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]                  # 让 setuptools 把 src 作为包包含
+exclude = ["tests*","examples*"]
+
+[tool.setuptools]
+include-package-data = true

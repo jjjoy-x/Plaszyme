@@ -7,8 +7,8 @@ from itertools import combinations
 from collections import defaultdict
 
 # ========= 配置路径 =========
-MATRIX_PATH = '/Users/shulei/PycharmProjects/Plaszyme/test/outputs/plastic_co_matrix.csv'  # 共降解矩阵路径
-SAVE_DIR = 'plots_per_plastic'             # 输出图保存路径
+MATRIX_PATH = '/Users/shulei/PycharmProjects/Plaszyme/test/outputs/plastic_co_jaccard_v0.2.6_matrix.csv'  # 共降解矩阵路径
+SAVE_DIR = 'plots_per_plastic_0.2.6'             # 输出图保存路径
 
 os.makedirs(SAVE_DIR, exist_ok=True)
 

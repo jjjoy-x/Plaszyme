@@ -1,3 +1,19 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Siamese training on plastic features + export pairwise distances/similarities.
+
+新增功能：
+  1) 训练结束后，基于最终 encoder 对每个塑料得到 embedding
+  2) 计算并导出：余弦相似度矩阵（similarity）与对应距离矩阵（distance = 1 - sim）
+  3) 同时保存 embedding 向量表，便于后续复用
+
+导出文件（均在 OUTDIR 下）：
+  - plastic_embeddings.csv      每个塑料的最终 embedding（64维，列名 emb_0..emb_63）
+  - plastic_similarity.csv      余弦相似度矩阵（行列均为塑料名）
+  - plastic_distance.csv        距离矩阵（1 - 余弦相似度）
+"""
+
 import os
 import torch
 import torch.nn as nn
@@ -11,16 +27,17 @@ from torch.utils.data import Dataset, DataLoader
 import imageio
 import cv2
 from fpdf import FPDF
+import numpy as np  # 新增
 
 # ===================== 用户配置 =====================
-RUN_NAME = "run11"
-FEATURE_CSV = "/Users/shulei/PycharmProjects/Plaszyme/test/outputs/all_description.csv"
+RUN_NAME = "run16"
+FEATURE_CSV = "/Users/shulei/PycharmProjects/Plaszyme/test/outputs/all_description_new_less.csv"
 CO_MATRIX_CSV = "/Users/shulei/PycharmProjects/Plaszyme/test/outputs/plastic_co_matrix.csv"
-LOSS_MODE = "mse"  # "mse" 或 "contrastive"
-MARGIN = 1.5
+LOSS_MODE = "contrastive"  # "mse" 或 "contrastive"
+MARGIN = 3
 SIM_THRESHOLD = 0.01
 BATCH_SIZE = 16
-EPOCHS = 300
+EPOCHS = 500
 LR = 1e-4
 PLOT_INTERVAL = 5
 
@@ -37,6 +54,11 @@ PDF_PATH = os.path.join(OUTDIR, "embedding_snapshots.pdf")
 LOSS_PATH = os.path.join(OUTDIR, "loss_curve.png")
 MODEL_PATH = os.path.join(OUTDIR, "siamese_model.pt")
 INFO_PATH = os.path.join(OUTDIR, "run_info.txt")
+
+# 新增导出路径
+EMBED_CSV_PATH = os.path.join(OUTDIR, "plastic_embeddings.csv")
+SIM_CSV_PATH   = os.path.join(OUTDIR, "plastic_similarity.csv")
+DIST_CSV_PATH  = os.path.join(OUTDIR, "plastic_distance.csv")
 
 os.makedirs(PLOT_DIR, exist_ok=True)
 
@@ -168,7 +190,7 @@ for epoch in range(EPOCHS):
         print(f"Epoch {epoch:03d} | Loss: {avg_loss:.5f}")
         plot_embeddings(model, features, epoch, PLOT_DIR)
 
-# ===================== 保存输出 =====================
+# ===================== 保存输出（原有） =====================
 plt.figure()
 plt.plot(range(EPOCHS), losses)
 plt.xlabel("Epoch")
@@ -202,3 +224,34 @@ print(f"📄 PDF report saved to {PDF_PATH}")
 
 torch.save(model.state_dict(), MODEL_PATH)
 print(f"✅ Model saved to {MODEL_PATH}")
+
+# ===================== 新增：导出 embedding / 相似度 / 距离矩阵 =====================
+with torch.no_grad():
+    model.eval()
+    X_all = torch.tensor(features.values, dtype=torch.float32, device=device)
+    Z = model.encoder(X_all)  # [N, 64]
+    Z = Z.detach().cpu().numpy()
+
+# 保存 embedding 表
+emb_cols = [f"emb_{i}" for i in range(Z.shape[1])]
+emb_df = pd.DataFrame(Z, index=features.index, columns=emb_cols)
+emb_df.to_csv(EMBED_CSV_PATH)
+print(f"🧬 Embeddings saved to {EMBED_CSV_PATH}")
+
+# 计算余弦相似度矩阵（行归一化后点积）
+Z_norm = Z / (np.linalg.norm(Z, axis=1, keepdims=True) + 1e-12)
+sim_mat = np.clip(Z_norm @ Z_norm.T, -1.0, 1.0)
+dist_mat = 1.0 - sim_mat  # 定义距离 = 1 - 余弦相似度
+
+# 数值与对角线修正
+np.fill_diagonal(sim_mat, 1.0)
+np.fill_diagonal(dist_mat, 0.0)
+
+# 保存矩阵
+sim_df = pd.DataFrame(sim_mat, index=features.index, columns=features.index)
+dist_df = pd.DataFrame(dist_mat, index=features.index, columns=features.index)
+sim_df.to_csv(SIM_CSV_PATH)
+dist_df.to_csv(DIST_CSV_PATH)
+
+print(f"🔗 Similarity matrix saved to {SIM_CSV_PATH}")
+print(f"📏 Distance matrix  saved to {DIST_CSV_PATH}")

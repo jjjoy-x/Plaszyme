@@ -172,7 +172,7 @@ def run_suite(pdb_file: str):
 # -----------------------------
 if __name__ == "__main__":
     # 改成你的 PDB 路径（确保是标准单链或由 chain_id 选择好）
-    PDB_FILE = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pdb/X0002.pdb"
+    PDB_FILE = "/root/autodl-tmp/M-CSA/pdbs/12as.pdb"
     assert os.path.exists(PDB_FILE), f"PDB not found: {PDB_FILE}"
 
     torch.manual_seed(0)
