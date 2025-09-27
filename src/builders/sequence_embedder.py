@@ -21,6 +21,7 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
+from tensorboard.compat.tensorflow_stub.tensor_shape import vector
 
 
 # ---------------------------
@@ -195,7 +196,7 @@ class ESMEmbedder(BaseProteinEmbedder):
             是否打印加载/运行信息。
     """
 
-    _DEFAULT_MODEL = "esm2_t12_35M_UR50D"
+    _DEFAULT_MODEL = "esm2_t33_650M_UR50D"
 
     def __init__(
         self,
@@ -513,4 +514,4 @@ class PhysChemEmbedder(BaseProteinEmbedder):
 # ---------------------------
 if __name__ == "__main__":
     seq = ["MKTFFVIVAVLCLLSVAAQQEALAKEH","FVIVAVLCLLSVAAQQEAL"]
-    print(PhysChemEmbedder().embed(seq))
+    print(ESMEmbedder().embed(seq))

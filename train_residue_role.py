@@ -12,10 +12,9 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader as GeoDataLoader
-from torch_geometric.data import Batch
 
 from src.builders.gnn_builder import GNNProteinGraphBuilder, BuilderConfig
-from src.models.heads.residue_role_head import ResidueRoleHead
+from src.heads.residue_role_head import ResidueRoleHead
 
 
 # ---------------- 配置 ----------------

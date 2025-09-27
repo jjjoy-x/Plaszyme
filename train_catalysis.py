@@ -26,7 +26,7 @@ warnings.filterwarnings(
 import sys, random
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import pandas as pd
 import torch
@@ -47,7 +47,7 @@ from src.builders.gvp_builder import GVPProteinGraphBuilder, BuilderConfig as GV
 from src.builders.gnn_builder  import GNNProteinGraphBuilder, BuilderConfig as GNNBuilderConfig
 from src.models.gvp.backbone   import GVPBackbone
 from src.models.gnn.backbone   import GNNBackbone
-from src.models.heads.residue_activity_head import ResidueActivityHead  # 你的头（支持 mask）
+from src.heads.residue_activity_head import ResidueActivityHead  # 你的头（支持 mask）
 
 # =========================
 # 配置

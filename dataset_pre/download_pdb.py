@@ -15,8 +15,8 @@ import pandas as pd
 from tqdm import tqdm
 
 # ===== 修改路径 =====
-CSV_PATH = "/tmp/pycharm_project_317/dataset/M-CSA/literature_pdb_residues_roles.csv"
-OUT_DIR  = "/root/autodl-tmp/M-CSA/pdbs"
+CSV_PATH = "/Users/shulei/PycharmProjects/Plaszyme/dataset/M-CSA/literature_pdb_residues_roles.csv"
+OUT_DIR  = "/Users/shulei/PycharmProjects/Plaszyme/dataset/M-CSA/pdbs"
 # ===================
 
 # RCSB 下载地址模板
