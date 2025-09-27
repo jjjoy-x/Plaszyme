@@ -84,9 +84,9 @@ class PairedPlaszymeDataset(Dataset):
         self,
         matrix: MatrixSpec,
         *,
-        mode: Mode = "point",
-        split: Split = "train",
-        split_ratio: Tuple[float, float, float] = (0.8, 0.1, 0.1),
+        mode: Mode = "list",
+        split: Optional[Split] | Literal["full"] | None = "train",
+        split_ratio: Optional[Tuple[float, float, float]] = (0.8, 0.2, 0),
         seed: int = 42,
         # 负样本策略（point/pair/list 通用或部分使用）
         neg_ratio: float = 1.0,          # point: 每个正样本配多少倍负样本（从当前行内0列随机采）
@@ -96,6 +96,10 @@ class PairedPlaszymeDataset(Dataset):
         plastic_featurizer: Any = None,  # 需要实现 .featurize_file(sdf_path) -> Tensor[D] 或 None
         # 链ID映射（可选）
         chain_map: Optional[Dict[str, str]] = None,  # {pdb_basename: chain_id}
+        # 新增：预测/分析时保留名称/ID
+        return_names: bool = True,
+        # 新增：list 模式允许不截断负样本（预测时更丰富）
+        no_truncate_list: bool = False,
     ):
         super().__init__()
         assert mode in ("point", "pair", "list")
@@ -111,6 +115,8 @@ class PairedPlaszymeDataset(Dataset):
         self.neg_ratio = float(neg_ratio)
         self.max_list_len = int(max_list_len)
         self.chain_map = chain_map or {}
+        self.return_names = bool(return_names)
+        self.no_truncate_list = bool(no_truncate_list)
 
         # 读取矩阵
         rows, cols, labels = _read_onehot_matrix(matrix)
@@ -122,19 +128,28 @@ class PairedPlaszymeDataset(Dataset):
         rng = random.Random(seed)
         row_ids = list(range(len(self.rows)))
         rng.shuffle(row_ids)
-        n = len(row_ids)
-        n_tr = int(n * split_ratio[0])
-        n_va = int(n * split_ratio[1])
-        id_tr = set(row_ids[:n_tr])
-        id_va = set(row_ids[n_tr:n_tr + n_va])
-        id_te = set(row_ids[n_tr + n_va:])
 
-        if split == "train":
-            keep = id_tr
-        elif split == "val":
-            keep = id_va
+        # 不切分：split 为 None / "full" 或 split_ratio 为 None
+        if (split is None) or (split == "full") or (split_ratio is None):
+            keep = set(row_ids)
         else:
-            keep = id_te
+            # 正常三段切分
+            assert isinstance(split_ratio, tuple) and len(split_ratio) == 3, "split_ratio 需为 (train,val,test)"
+            n = len(row_ids)
+            n_tr = int(n * split_ratio[0])
+            n_va = int(n * split_ratio[1])
+            id_tr = set(row_ids[:n_tr])
+            id_va = set(row_ids[n_tr:n_tr + n_va])
+            id_te = set(row_ids[n_tr + n_va:])
+
+            if split == "train":
+                keep = id_tr
+            elif split == "val":
+                keep = id_va
+            elif split == "test":
+                keep = id_te
+            else:
+                raise ValueError(f"未知 split={split}")
 
         # 生成索引
         if mode == "point":
@@ -241,17 +256,36 @@ class PairedPlaszymeDataset(Dataset):
             pdb_name, sdf_name, y = self.samples[idx]
             g = self._get_graph(pdb_name)
             f = self._get_plastic(sdf_name)
-            # 保持简单：返回 None 让 collate 过滤
-            return {"mode": "point", "pdb_name": pdb_name, "sdf_name": sdf_name,
-                    "enzyme_graph": g, "plastic_feat": f, "label": torch.tensor([y], dtype=torch.float32)}
+            sample = {
+                "mode": "point",
+                "enzyme_graph": g,
+                "plastic_feat": f,
+                "label": torch.tensor([y], dtype=torch.float32),
+            }
+            # 保留名称
+            if self.return_names:
+                sample["enzyme_id"] = os.path.splitext(os.path.basename(pdb_name))[0]
+                sample["pdb_name"] = pdb_name
+                sample["plastic_name"] = sdf_name
+            return sample
 
         if self.mode == "pair":
             pdb_name, sdf_pos, sdf_neg = self.samples[idx]
             g = self._get_graph(pdb_name)
             f_pos = self._get_plastic(sdf_pos)
             f_neg = self._get_plastic(sdf_neg)
-            return {"mode": "pair", "pdb_name": pdb_name,
-                    "enzyme_graph": g, "plastic_pos": f_pos, "plastic_neg": f_neg}
+            sample = {
+                "mode": "pair",
+                "enzyme_graph": g,
+                "plastic_pos": f_pos,
+                "plastic_neg": f_neg,
+            }
+            if self.return_names:
+                sample["enzyme_id"] = os.path.splitext(os.path.basename(pdb_name))[0]
+                sample["pdb_name"] = pdb_name
+                sample["plastic_pos_name"] = sdf_pos
+                sample["plastic_neg_name"] = sdf_neg
+            return sample
 
         # listwise
         row_id = self.row_indices[idx]
@@ -261,43 +295,62 @@ class PairedPlaszymeDataset(Dataset):
         pos_cols = [s for s in self.cols if self.labels[(pdb_name, s)] == 1]
         neg_cols = [s for s in self.cols if self.labels[(pdb_name, s)] == 0]
 
-        # 收集成 (feat_tensor, label_float) 对，最后统一过滤 None
-        pairs: List[Tuple[Optional[torch.Tensor], float]] = []
+        # 收集 (name, feat_tensor, label_float) 三元组，最后统一过滤 None
+        triples: List[Tuple[str, Optional[torch.Tensor], float]] = []
 
         # 先放正样本（尽量全保留）
         for s in pos_cols:
             f = self._get_plastic(s)
-            pairs.append((f, 1.0))
+            triples.append((s, f, 1.0))
 
-        # 再采负样本：最多补到 max_list_len
-        k_neg = max(0, self.max_list_len - sum(1 for f, _ in pairs if f is not None))
-        if k_neg > 0 and len(neg_cols) > 0:
+        # 再采负样本
+        if self.no_truncate_list:
+            # 尽量多放（仍只从该行负样本里采）
             random.shuffle(neg_cols)
-            taken = 0
             for s in neg_cols:
-                if taken >= k_neg:
-                    break
                 f = self._get_plastic(s)
-                if f is None:
-                    continue
-                pairs.append((f, 0.0))
-                taken += 1
+                if f is not None:
+                    triples.append((s, f, 0.0))
+        else:
+            # 最多补到 max_list_len
+            k_neg = max(0, self.max_list_len - sum(1 for _, f, _ in triples if f is not None))
+            if k_neg > 0 and len(neg_cols) > 0:
+                random.shuffle(neg_cols)
+                taken = 0
+                for s in neg_cols:
+                    if taken >= k_neg:
+                        break
+                    f = self._get_plastic(s)
+                    if f is None:
+                        continue
+                    triples.append((s, f, 0.0))
+                    taken += 1
 
         # 过滤掉 None
-        pairs = [(f, y) for (f, y) in pairs if f is not None]
+        triples = [(name, f, y) for (name, f, y) in triples if f is not None]
 
-        if len(pairs) == 0:
-            # 空样本；训练脚本应在看到长度 0 时跳过
+        if len(triples) == 0:
             plast_feat = torch.empty(0, 0)
             labels = torch.empty(0, dtype=torch.float32)
+            names: List[str] = []
         else:
-            plastics = [f for (f, _) in pairs]                  # list of [1, D]
-            rels     = [y for (_, y) in pairs]                  # list of float
-            plast_feat = torch.cat(plastics, dim=0)             # [L, D]
-            labels    = torch.tensor(rels, dtype=torch.float32) # [L]
+            names    = [name for (name, _, _) in triples]
+            plastics = [f for (_, f, _) in triples]                  # list of [1, D]
+            rels     = [y for (_, _, y) in triples]                  # list of float
+            plast_feat = torch.cat(plastics, dim=0)                  # [L, D]
+            labels    = torch.tensor(rels, dtype=torch.float32)      # [L]
 
-        return {"mode": "list", "pdb_name": pdb_name, "enzyme_graph": g,
-                "plastic_list": plast_feat, "relevance": labels}
+        sample = {
+            "mode": "list",
+            "enzyme_graph": g,
+            "plastic_list": plast_feat,
+            "relevance": labels,
+        }
+        if self.return_names:
+            sample["enzyme_id"] = os.path.splitext(os.path.basename(pdb_name))[0]
+            sample["pdb_name"] = pdb_name
+            sample["plastic_names"] = names  # 与 plastic_list / relevance 一一对应
+        return sample
 
 
 # ========= Collate 函数（把多个样本拼成批） =========
@@ -307,6 +360,7 @@ def collate_pairs(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
       - 将多个 PyG Data -> Batch
       - 将塑料特征按模式堆叠
       - 对 point/pair 模式：在 collate 阶段过滤 None（缺失/失败）
+      - 同时保留名称字段（若存在）
     """
     assert len(batch) > 0
     mode: Mode = batch[0]["mode"]
@@ -330,12 +384,24 @@ def collate_pairs(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
     if mode == "point":
         feats = torch.cat([b["plastic_feat"] for b in batch], dim=0)  # [B, D]
         labels = torch.cat([b["label"] for b in batch], dim=0)        # [B]
-        return {"mode": "point", "enzyme_graph": enzyme_batch, "plastic_feat": feats, "label": labels}
+        out = {"mode": "point", "enzyme_graph": enzyme_batch, "plastic_feat": feats, "label": labels}
+        # 保留名称
+        if "enzyme_id" in batch[0]:
+            out["enzyme_id"] = [b["enzyme_id"] for b in batch]
+            out["pdb_name"] = [b["pdb_name"] for b in batch]
+            out["plastic_name"] = [b["plastic_name"] for b in batch]
+        return out
 
     if mode == "pair":
         pos = torch.cat([b["plastic_pos"] for b in batch], dim=0)     # [B, D]
         neg = torch.cat([b["plastic_neg"] for b in batch], dim=0)     # [B, D]
-        return {"mode": "pair", "enzyme_graph": enzyme_batch, "plastic_pos": pos, "plastic_neg": neg}
+        out = {"mode": "pair", "enzyme_graph": enzyme_batch, "plastic_pos": pos, "plastic_neg": neg}
+        if "enzyme_id" in batch[0]:
+            out["enzyme_id"] = [b["enzyme_id"] for b in batch]
+            out["pdb_name"] = [b["pdb_name"] for b in batch]
+            out["plastic_pos_name"] = [b["plastic_pos_name"] for b in batch]
+            out["plastic_neg_name"] = [b["plastic_neg_name"] for b in batch]
+        return out
 
     # listwise：这里每个样本的 list 长度可能不同，训练脚本里通常会逐条处理或 padding
     # 为保持简单，我们原样返回 list（不做 padding），由训练脚本循环内部样本处理。
