@@ -61,15 +61,15 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 # ====== 项目内部依赖 ======
-from src.builders.gnn_builder import GNNProteinGraphBuilder, BuilderConfig as GNNBuilderConfig
-from src.builders.gvp_builder import GVPProteinGraphBuilder, BuilderConfig as GVPBuilderConfig
-from src.data.loader import MatrixSpec, PairedPlaszymeDataset, collate_pairs
-from src.models.gnn.backbone import GNNBackbone
-from src.models.gvp.backbone import GVPBackbone
-from src.models.seq_mlp.backbone import SeqBackbone
-from src.models.plastic_backbone import PolymerTower
-from src.plastic.descriptors_rdkit import PlasticFeaturizer
-from src.models.interaction_head import InteractionHead
+from plaszyme.builders.gnn_builder import GNNProteinGraphBuilder, BuilderConfig as GNNBuilderConfig
+from plaszyme.builders.gvp_builder import GVPProteinGraphBuilder, BuilderConfig as GVPBuilderConfig
+from plaszyme.data.loader import MatrixSpec, PairedPlaszymeDataset, collate_pairs
+from plaszyme.models.gnn.backbone import GNNBackbone
+from plaszyme.models.gvp.backbone import GVPBackbone
+from plaszyme.models.seq_mlp.backbone import SeqBackbone
+from plaszyme.models.plastic_backbone import PolymerTower
+from plaszyme.plastic.descriptors_rdkit import PlasticFeaturizer
+from plaszyme.models.interaction_head import InteractionHead
 
 
 # =============================================================================
@@ -88,7 +88,7 @@ class TrainConfig:
     train_csv: str = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/plastics_onehot_trainset.csv"
     test_csv: str = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/plastics_onehot_testset.csv"
 
-    out_dir: str = "./train_results/gnn_gated"
+    out_dir: str = "../train_script/train_results/gnn_gated"
 
     # 超参（与原脚本一致）
     emb_dim_enz: int = 128

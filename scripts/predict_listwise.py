@@ -57,15 +57,15 @@ import pandas as pd
 # ===============================================================================
 
 # Model and data path configuration
-MODEL_PATH = "/Users/shulei/PycharmProjects/Plaszyme/train_script/train_results/gnn_bilinear/best_bilinear.pt"
-PT_OUT_ROOT = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pt"
-SDF_ROOT = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf_new"
+MODEL_PATH = "../weights/gnn_bilinear/best_bilinear.pt"
+PT_OUT_ROOT = "./data/processed/graphs_pt"
+SDF_ROOT = "./data/plastics_sdf/10_mers"
 PDB_ROOT = os.getcwd()
 
 # Prediction configuration
+OUTPUT_DIR = "../prediction_results"
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 TOP_K = 10  # Return top K highest scoring results
-OUTPUT_DIR = "./prediction_results"
 INCLUDE_CONFIDENCE = True  # Include confidence and additional metrics
 
 # Plastic list configuration
@@ -99,14 +99,14 @@ VERBOSE = True  # Show detailed logs
 # ===============================================================================
 
 # Project internal dependencies
-from src.builders.gnn_builder import GNNProteinGraphBuilder, BuilderConfig as GNNBuilderConfig
-from src.builders.gvp_builder import GVPProteinGraphBuilder, BuilderConfig as GVPBuilderConfig
-from src.models.gnn.backbone import GNNBackbone
-from src.models.gvp.backbone import GVPBackbone
-from src.models.seq_mlp.backbone import SeqBackbone
-from src.models.plastic_backbone import PolymerTower
-from src.plastic.descriptors_rdkit import PlasticFeaturizer
-from src.models.interaction_head import InteractionHead
+from plaszyme.builders.gnn_builder import GNNProteinGraphBuilder, BuilderConfig as GNNBuilderConfig
+from plaszyme.builders.gvp_builder import GVPProteinGraphBuilder, BuilderConfig as GVPBuilderConfig
+from plaszyme.models.gnn.backbone import GNNBackbone
+from plaszyme.models.gvp.backbone import GVPBackbone
+from plaszyme.models.seq_mlp.backbone import SeqBackbone
+from plaszyme.models.plastic_backbone import PolymerTower
+from plaszyme.plastic.descriptors_rdkit import PlasticFeaturizer
+from plaszyme.models.interaction_head import InteractionHead
 
 
 class TwinProjector(nn.Module):

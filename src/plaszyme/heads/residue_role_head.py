@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 from torch_geometric.data import Batch
 
-from src.models.gnn.backbone import GNNBackbone
+from src.plaszyme.models.gnn.backbone import GNNBackbone
 
 
 class ResidueRoleHead(nn.Module):

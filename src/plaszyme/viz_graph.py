@@ -21,12 +21,12 @@ import numpy as np
 import torch
 
 # === 根据你的包结构调整导入路径 ===
-from builders.base_builder import (
+from src.plaszyme.builders import (
     BuilderConfig,
     _parse_pdb_single_chain,  # 用于兜底重建坐标
 )
-from builders.gnn_builder import GNNProteinGraphBuilder
-from builders.gvp_builder import GVPProteinGraphBuilder
+from src.plaszyme.builders.gnn_builder import GNNProteinGraphBuilder
+from src.plaszyme.builders.gvp_builder import GVPProteinGraphBuilder
 
 
 # -----------------------------

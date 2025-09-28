@@ -1,4 +1,11 @@
 # src/data/loader.py
+"""Data loader module for Plaszyme dataset handling.
+
+This module provides unified dataset classes for enzyme-plastic interaction prediction,
+supporting multiple training modes (pointwise, pairwise, listwise) with flexible
+data loading and preprocessing capabilities.
+"""
+
 from __future__ import annotations
 
 import warnings
@@ -19,23 +26,42 @@ Mode = Literal["point", "pair", "list"]
 # ========= 读取独热矩阵 =========
 @dataclass
 class MatrixSpec:
-    """描述独热矩阵位置与对应根目录"""
+    """Specification for one-hot matrix location and corresponding root directories.
+
+    Attributes:
+        csv_path: Path to the CSV file containing the one-hot matrix.
+        pdb_root: Root directory containing PDB files.
+        sdf_root: Root directory containing SDF files.
+
+    Note:
+        Can be extended with chain column if certain PDBs need fixed chains,
+        provide a {pdb:chain} mapping outside the one-hot matrix.
+    """
     csv_path: str
     pdb_root: str
     sdf_root: str
-    # 可扩展: chain 列（如果某些 PDB 需要固定链，可在独热矩阵之外提供一个 {pdb:chain} 的映射）
 
 
 def _read_onehot_matrix(spec: MatrixSpec) -> Tuple[List[str], List[str], Dict[Tuple[str, str], int]]:
-    """
-    读取独热矩阵:
-      - 行是 PDB 文件名（含/不含后缀都接受，最终会自动补 .pdb）
-      - 列是 SDF 文件名（含/不含后缀都接受，最终会自动补 .sdf）
-      - 值 ∈ {0,1}
-    Return:
-      rows: List[pdb_basename]
-      cols: List[sdf_basename]
-      labels: dict[(pdb_basename, sdf_basename)] -> 0/1
+    """Read one-hot matrix from CSV file.
+
+    The matrix format:
+    - Rows represent PDB filenames (with/without extension accepted, .pdb will be auto-appended)
+    - Columns represent SDF filenames (with/without extension accepted, .sdf will be auto-appended)
+    - Values are binary {0,1}
+
+    Args:
+        spec: Matrix specification containing file paths and directories.
+
+    Returns:
+        A tuple containing:
+            - rows: List of PDB basenames
+            - cols: List of SDF basenames
+            - labels: Dictionary mapping (pdb_basename, sdf_basename) to 0/1
+
+    Raises:
+        FileNotFoundError: If CSV file doesn't exist.
+        ValueError: If CSV has insufficient columns.
     """
     if not os.path.isfile(spec.csv_path):
         raise FileNotFoundError(spec.csv_path)
@@ -44,9 +70,9 @@ def _read_onehot_matrix(spec: MatrixSpec) -> Tuple[List[str], List[str], Dict[Tu
         reader = csv.reader(f)
         header = next(reader)
         if len(header) < 2:
-            raise ValueError("独热矩阵CSV至少需要1列塑料名")
+            raise ValueError("One-hot matrix CSV requires at least 1 plastic column")
 
-        # 第一列是行名占位，后续列是塑料名
+        # First column is row name placeholder, subsequent columns are plastic names
         raw_cols = header[1:]
         cols = [c if os.path.splitext(c)[1].lower() == ".sdf" else f"{c}.sdf" for c in raw_cols]
 
@@ -61,10 +87,10 @@ def _read_onehot_matrix(spec: MatrixSpec) -> Tuple[List[str], List[str], Dict[Tu
                 pdb_name = f"{pdb_name}.pdb"
             rows.append(pdb_name)
 
-            # 每一行后续是 0/1
+            # Each row contains subsequent 0/1 values
             for j, v in enumerate(line[1:]):
                 try:
-                    val = int(float(v))  # 兼容 "0","1","0.0","1.0"
+                    val = int(float(v))  # Compatible with "0","1","0.0","1.0"
                 except Exception:
                     val = 0
                 labels[(pdb_name, cols[j])] = 1 if val >= 1 else 0
@@ -74,41 +100,72 @@ def _read_onehot_matrix(spec: MatrixSpec) -> Tuple[List[str], List[str], Dict[Tu
 
 # ========= 核心数据集 =========
 class PairedPlaszymeDataset(Dataset):
-    """
-    统一数据集：支持 point / pair / list 三种输出模式。
-    - 只保存文件名与标签，真正的“PDB->图 / SDF->特征”在 __getitem__ 时调用外部 builder/featurizer 完成。
-    - 你也可以选择在 DataLoader 的 collate_fn 里做（更高效的批内复用/缓存），本实现为简单直接版本。
+    """Unified dataset supporting point/pair/list output modes.
+
+    This dataset only stores filenames and labels. The actual "PDB->graph / SDF->features"
+    conversion is performed in __getitem__ by calling external builder/featurizer.
+    Alternatively, this can be done in DataLoader's collate_fn for more efficient
+    batch-level reuse/caching.
+
+    Attributes:
+        mode: Training mode - "point", "pair", or "list"
+        matrix_spec: Matrix specification for data location
+        neg_ratio: Ratio of negative samples per positive sample (for point mode)
+        max_list_len: Maximum number of plastics per enzyme in list mode
+        chain_map: Optional mapping from PDB basename to chain ID
+        return_names: Whether to include names/IDs in returned samples
+        no_truncate_list: Whether to avoid truncating negative samples in list mode
     """
 
     def __init__(
-        self,
-        matrix: MatrixSpec,
-        *,
-        mode: Mode = "list",
-        split: Optional[Split] | Literal["full"] | None = "train",
-        split_ratio: Optional[Tuple[float, float, float]] = (0.8, 0.2, 0),
-        seed: int = 42,
-        # 负样本策略（point/pair/list 通用或部分使用）
-        neg_ratio: float = 1.0,          # point: 每个正样本配多少倍负样本（从当前行内0列随机采）
-        max_list_len: int = 16,          # list: 每个 enzyme 采样的塑料总数上限（含正+负）
-        # 构建器（传入实例！）
-        enzyme_builder: Any = None,      # 需要实现 .build_one(pdb_path, name=...) -> (PyGData, misc)
-        plastic_featurizer: Any = None,  # 需要实现 .featurize_file(sdf_path) -> Tensor[D] 或 None
-        # 链ID映射（可选）
-        chain_map: Optional[Dict[str, str]] = None,  # {pdb_basename: chain_id}
-        # 新增：预测/分析时保留名称/ID
-        return_names: bool = True,
-        # 新增：list 模式允许不截断负样本（预测时更丰富）
-        no_truncate_list: bool = False,
+            self,
+            matrix: MatrixSpec,
+            *,
+            mode: Mode = "list",
+            split: Optional[Split] | Literal["full"] | None = "train",
+            split_ratio: Optional[Tuple[float, float, float]] = (0.8, 0.2, 0),
+            seed: int = 42,
+            # Negative sampling strategy (common or partial use across point/pair/list)
+            neg_ratio: float = 1.0,
+            # point: how many negative samples per positive sample (random from current row's 0 columns)
+            max_list_len: int = 16,  # list: max total plastic count per enzyme (including positive + negative)
+            # Builders (pass instances!)
+            enzyme_builder: Any = None,  # Must implement .build_one(pdb_path, name=...) -> (PyGData, misc)
+            plastic_featurizer: Any = None,  # Must implement .featurize_file(sdf_path) -> Tensor[D] or None
+            # Chain ID mapping (optional)
+            chain_map: Optional[Dict[str, str]] = None,  # {pdb_basename: chain_id}
+            # New: retain names/IDs for prediction/analysis
+            return_names: bool = True,
+            # New: allow not truncating negative samples in list mode (richer for prediction)
+            no_truncate_list: bool = False,
     ):
+        """Initialize the dataset.
+
+        Args:
+            matrix: Matrix specification containing data paths.
+            mode: Output mode - "point", "pair", or "list".
+            split: Data split to use - "train", "val", "test", "full", or None.
+            split_ratio: Ratio for train/val/test split.
+            seed: Random seed for reproducibility.
+            neg_ratio: Negative sampling ratio for point mode.
+            max_list_len: Maximum list length for list mode.
+            enzyme_builder: Builder instance for protein graphs.
+            plastic_featurizer: Featurizer instance for plastic features.
+            chain_map: Optional chain ID mapping.
+            return_names: Whether to return sample names/IDs.
+            no_truncate_list: Whether to avoid truncating in list mode.
+
+        Raises:
+            ValueError: If builder instances are not provided or invalid split specified.
+        """
         super().__init__()
         assert mode in ("point", "pair", "list")
         self.mode = mode
         self.matrix_spec = matrix
 
-        # 要求传入实例，避免循环依赖
+        # Require instance to avoid circular dependencies
         if enzyme_builder is None or plastic_featurizer is None:
-            raise ValueError("请传入 enzyme_builder 实例 与 plastic_featurizer 实例。")
+            raise ValueError("Please provide enzyme_builder instance and plastic_featurizer instance.")
         self.enzyme_builder = enzyme_builder
         self.plastic_featurizer = plastic_featurizer
 
@@ -118,23 +175,23 @@ class PairedPlaszymeDataset(Dataset):
         self.return_names = bool(return_names)
         self.no_truncate_list = bool(no_truncate_list)
 
-        # 读取矩阵
+        # Read matrix
         rows, cols, labels = _read_onehot_matrix(matrix)
-        self.rows = rows  # pdb 名
-        self.cols = cols  # sdf 名
+        self.rows = rows  # PDB names
+        self.cols = cols  # SDF names
         self.labels = labels  # (pdb,sdf) -> 0/1
 
-        # 按行切分（基于 pdb）
+        # Split by rows (based on PDB)
         rng = random.Random(seed)
         row_ids = list(range(len(self.rows)))
         rng.shuffle(row_ids)
 
-        # 不切分：split 为 None / "full" 或 split_ratio 为 None
+        # No split: split is None/"full" or split_ratio is None
         if (split is None) or (split == "full") or (split_ratio is None):
             keep = set(row_ids)
         else:
-            # 正常三段切分
-            assert isinstance(split_ratio, tuple) and len(split_ratio) == 3, "split_ratio 需为 (train,val,test)"
+            # Normal three-way split
+            assert isinstance(split_ratio, tuple) and len(split_ratio) == 3, "split_ratio must be (train,val,test)"
             n = len(row_ids)
             n_tr = int(n * split_ratio[0])
             n_va = int(n * split_ratio[1])
@@ -149,23 +206,23 @@ class PairedPlaszymeDataset(Dataset):
             elif split == "test":
                 keep = id_te
             else:
-                raise ValueError(f"未知 split={split}")
+                raise ValueError(f"Unknown split={split}")
 
-        # 生成索引
+        # Generate indices based on mode
         if mode == "point":
-            # 为 pointwise 提前生成 (pdb,sdf,label) 三元组，并做负采样
+            # Pre-generate (pdb,sdf,label) triplets for pointwise with negative sampling
             self.samples: List[Tuple[str, str, int]] = []
             for i in range(len(self.rows)):
                 if i not in keep:
                     continue
                 pdb = self.rows[i]
-                # 正样本列
+                # Positive sample columns
                 pos_cols = [s for s in self.cols if self.labels[(pdb, s)] == 1]
                 neg_cols = [s for s in self.cols if self.labels[(pdb, s)] == 0]
-                # 全加入正样本
+                # Add all positive samples
                 for s in pos_cols:
                     self.samples.append((pdb, s, 1))
-                # 负采样
+                # Negative sampling
                 k_neg = int(len(pos_cols) * self.neg_ratio) if self.neg_ratio > 0 else 0
                 if k_neg > 0 and len(neg_cols) > 0:
                     rng.shuffle(neg_cols)
@@ -173,7 +230,7 @@ class PairedPlaszymeDataset(Dataset):
                         self.samples.append((pdb, s, 0))
 
         elif mode == "pair":
-            # 为 pairwise 生成 (pdb, pos_sdf, neg_sdf) 三元组（每个正样本配一个随机负样本）
+            # Generate (pdb, pos_sdf, neg_sdf) triplets for pairwise (each positive paired with random negative)
             self.samples: List[Tuple[str, str, str]] = []
             for i in range(len(self.rows)):
                 if i not in keep:
@@ -188,10 +245,10 @@ class PairedPlaszymeDataset(Dataset):
                     self.samples.append((pdb, s_pos, s_neg))
 
         else:
-            # listwise：每行一个样本，返回一个 enzyme + 多个 plastics（含正/随机负），以及 0/1 相关性
+            # Listwise: one sample per row, returns one enzyme + multiple plastics (pos/random neg) with 0/1 relevance
             self.row_indices = [i for i in range(len(self.rows)) if i in keep]
 
-        # 简单内存缓存（跨 epoch 复用）
+        # Simple memory cache (reuse across epochs)
         self._cache_graph: Dict[str, PyGData] = {}
         self._cache_plastic: Dict[str, torch.Tensor] = {}
         self._missing_sdf_warned: set[str] = set()
@@ -200,18 +257,47 @@ class PairedPlaszymeDataset(Dataset):
         self._failed_feat_count: int = 0
 
     def __len__(self) -> int:
+        """Return dataset length based on mode."""
         if self.mode in ("point", "pair"):
             return len(self.samples)
         return len(self.row_indices)
 
     # --- 内部工具 ---
     def _pdb_path(self, pdb_name: str) -> str:
+        """Get full path for PDB file.
+
+        Args:
+            pdb_name: PDB filename.
+
+        Returns:
+            Full path to PDB file.
+        """
         return os.path.join(self.matrix_spec.pdb_root, pdb_name)
 
     def _sdf_path(self, sdf_name: str) -> str:
+        """Get full path for SDF file.
+
+        Args:
+            sdf_name: SDF filename.
+
+        Returns:
+            Full path to SDF file.
+        """
         return os.path.join(self.matrix_spec.sdf_root, sdf_name)
 
     def _get_graph(self, pdb_name: str) -> PyGData:
+        """Get protein graph with caching.
+
+        Args:
+            pdb_name: PDB filename.
+
+        Returns:
+            PyTorch Geometric Data object representing the protein graph.
+
+        Raises:
+            FileNotFoundError: If PDB file doesn't exist.
+            TypeError: If builder doesn't return PyG Data object.
+        """
         if pdb_name in self._cache_graph:
             return self._cache_graph[pdb_name]
         pdb_path = self._pdb_path(pdb_name)
@@ -220,38 +306,54 @@ class PairedPlaszymeDataset(Dataset):
         name = os.path.splitext(os.path.basename(pdb_path))[0]
         g, _ = self.enzyme_builder.build_one(pdb_path, name=name)
         if not isinstance(g, PyGData):
-            raise TypeError("enzyme_builder.build_one 必须返回 (PyG Data, misc)")
+            raise TypeError("enzyme_builder.build_one must return (PyG Data, misc)")
         self._cache_graph[pdb_name] = g
         return g
 
     def _get_plastic(self, sdf_name: str) -> Optional[torch.Tensor]:
+        """Get plastic features with caching and error handling.
+
+        Args:
+            sdf_name: SDF filename.
+
+        Returns:
+            Tensor of shape [1, D] containing plastic features, or None if failed.
+        """
         if sdf_name in self._cache_plastic:
             return self._cache_plastic[sdf_name]
 
         sdf_path = self._sdf_path(sdf_name)
         if not os.path.isfile(sdf_path):
-            # 同一个缺失文件仅告警一次，并计数
+            # Warn only once per missing file and count
             if sdf_path not in self._missing_sdf_warned:
-                warnings.warn(f"[PairedPlaszymeDataset] ⚠️ 缺失 SDF 文件: {sdf_path}，跳过该样本")
+                warnings.warn(f"[PairedPlaszymeDataset] Missing SDF file: {sdf_path}, skipping sample")
                 self._missing_sdf_warned.add(sdf_path)
             self._missing_sdf_count += 1
             return None
 
         f = self.plastic_featurizer.featurize_file(sdf_path)
         if f is None:
-            # 同一个失败文件仅告警一次，并计数
+            # Warn only once per failed file and count
             if sdf_path not in self._failed_feat_warned:
-                warnings.warn(f"[PairedPlaszymeDataset] ⚠️ 特征提取失败: {sdf_path}，跳过该样本")
+                warnings.warn(f"[PairedPlaszymeDataset] Feature extraction failed: {sdf_path}, skipping sample")
                 self._failed_feat_warned.add(sdf_path)
             self._failed_feat_count += 1
             return None
 
-        f = f.view(1, -1)  # 统一 [1, D]
+        f = f.view(1, -1)  # Ensure [1, D] shape
         self._cache_plastic[sdf_name] = f
         return f
 
     # --- 三种模式的 __getitem__ ---
     def __getitem__(self, idx: int) -> Dict[str, Any]:
+        """Get sample by index with mode-specific behavior.
+
+        Args:
+            idx: Sample index.
+
+        Returns:
+            Dictionary containing sample data with mode-specific structure.
+        """
         if self.mode == "point":
             pdb_name, sdf_name, y = self.samples[idx]
             g = self._get_graph(pdb_name)
@@ -262,7 +364,7 @@ class PairedPlaszymeDataset(Dataset):
                 "plastic_feat": f,
                 "label": torch.tensor([y], dtype=torch.float32),
             }
-            # 保留名称
+            # Retain names
             if self.return_names:
                 sample["enzyme_id"] = os.path.splitext(os.path.basename(pdb_name))[0]
                 sample["pdb_name"] = pdb_name
@@ -287,7 +389,7 @@ class PairedPlaszymeDataset(Dataset):
                 sample["plastic_neg_name"] = sdf_neg
             return sample
 
-        # listwise
+        # Listwise mode
         row_id = self.row_indices[idx]
         pdb_name = self.rows[row_id]
         g = self._get_graph(pdb_name)
@@ -295,24 +397,24 @@ class PairedPlaszymeDataset(Dataset):
         pos_cols = [s for s in self.cols if self.labels[(pdb_name, s)] == 1]
         neg_cols = [s for s in self.cols if self.labels[(pdb_name, s)] == 0]
 
-        # 收集 (name, feat_tensor, label_float) 三元组，最后统一过滤 None
+        # Collect (name, feat_tensor, label_float) triplets, filter None later
         triples: List[Tuple[str, Optional[torch.Tensor], float]] = []
 
-        # 先放正样本（尽量全保留）
+        # Add positive samples first (try to keep all)
         for s in pos_cols:
             f = self._get_plastic(s)
             triples.append((s, f, 1.0))
 
-        # 再采负样本
+        # Add negative samples
         if self.no_truncate_list:
-            # 尽量多放（仍只从该行负样本里采）
+            # Add as many as possible (still only from this row's negative samples)
             random.shuffle(neg_cols)
             for s in neg_cols:
                 f = self._get_plastic(s)
                 if f is not None:
                     triples.append((s, f, 0.0))
         else:
-            # 最多补到 max_list_len
+            # Fill up to max_list_len
             k_neg = max(0, self.max_list_len - sum(1 for _, f, _ in triples if f is not None))
             if k_neg > 0 and len(neg_cols) > 0:
                 random.shuffle(neg_cols)
@@ -326,7 +428,7 @@ class PairedPlaszymeDataset(Dataset):
                     triples.append((s, f, 0.0))
                     taken += 1
 
-        # 过滤掉 None
+        # Filter out None values
         triples = [(name, f, y) for (name, f, y) in triples if f is not None]
 
         if len(triples) == 0:
@@ -334,11 +436,11 @@ class PairedPlaszymeDataset(Dataset):
             labels = torch.empty(0, dtype=torch.float32)
             names: List[str] = []
         else:
-            names    = [name for (name, _, _) in triples]
-            plastics = [f for (_, f, _) in triples]                  # list of [1, D]
-            rels     = [y for (_, _, y) in triples]                  # list of float
-            plast_feat = torch.cat(plastics, dim=0)                  # [L, D]
-            labels    = torch.tensor(rels, dtype=torch.float32)      # [L]
+            names = [name for (name, _, _) in triples]
+            plastics = [f for (_, f, _) in triples]  # list of [1, D]
+            rels = [y for (_, _, y) in triples]  # list of float
+            plast_feat = torch.cat(plastics, dim=0)  # [L, D]
+            labels = torch.tensor(rels, dtype=torch.float32)  # [L]
 
         sample = {
             "mode": "list",
@@ -349,43 +451,54 @@ class PairedPlaszymeDataset(Dataset):
         if self.return_names:
             sample["enzyme_id"] = os.path.splitext(os.path.basename(pdb_name))[0]
             sample["pdb_name"] = pdb_name
-            sample["plastic_names"] = names  # 与 plastic_list / relevance 一一对应
+            sample["plastic_names"] = names  # One-to-one correspondence with plastic_list/relevance
         return sample
 
 
 # ========= Collate 函数（把多个样本拼成批） =========
 def collate_pairs(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    通用 collate：
-      - 将多个 PyG Data -> Batch
-      - 将塑料特征按模式堆叠
-      - 对 point/pair 模式：在 collate 阶段过滤 None（缺失/失败）
-      - 同时保留名称字段（若存在）
+    """Universal collate function for batching samples.
+
+    Features:
+    - Converts multiple PyG Data -> Batch
+    - Stacks plastic features by mode
+    - For point/pair modes: filters None (missing/failed) at collate stage
+    - Retains name fields if present
+
+    Args:
+        batch: List of sample dictionaries from dataset.
+
+    Returns:
+        Batched dictionary with mode-specific structure.
+
+    Raises:
+        ValueError: If all samples in batch are invalid (contain None values).
     """
     assert len(batch) > 0
     mode: Mode = batch[0]["mode"]
 
-    # 先按模式过滤掉含 None 的条目
+    # Filter out entries containing None by mode
     if mode == "point":
         batch = [b for b in batch if b.get("plastic_feat", None) is not None]
     elif mode == "pair":
-        batch = [b for b in batch if (b.get("plastic_pos", None) is not None and b.get("plastic_neg", None) is not None)]
+        batch = [b for b in batch if
+                 (b.get("plastic_pos", None) is not None and b.get("plastic_neg", None) is not None)]
     else:
-        # listwise：各样本内部已自行过滤 None，这里不动
+        # Listwise: each sample has already filtered None internally, no action needed here
         pass
 
     if len(batch) == 0:
-        raise ValueError("[collate_pairs] 本批次有效样本为 0（均因缺失/解析失败被过滤）。")
+        raise ValueError("[collate_pairs] Batch has 0 valid samples (all filtered due to missing/parsing failures).")
 
-    # 酶图
+    # Enzyme graphs
     g_list = [b["enzyme_graph"] for b in batch]
     enzyme_batch = Batch.from_data_list(g_list)
 
     if mode == "point":
         feats = torch.cat([b["plastic_feat"] for b in batch], dim=0)  # [B, D]
-        labels = torch.cat([b["label"] for b in batch], dim=0)        # [B]
+        labels = torch.cat([b["label"] for b in batch], dim=0)  # [B]
         out = {"mode": "point", "enzyme_graph": enzyme_batch, "plastic_feat": feats, "label": labels}
-        # 保留名称
+        # Retain names
         if "enzyme_id" in batch[0]:
             out["enzyme_id"] = [b["enzyme_id"] for b in batch]
             out["pdb_name"] = [b["pdb_name"] for b in batch]
@@ -393,8 +506,8 @@ def collate_pairs(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         return out
 
     if mode == "pair":
-        pos = torch.cat([b["plastic_pos"] for b in batch], dim=0)     # [B, D]
-        neg = torch.cat([b["plastic_neg"] for b in batch], dim=0)     # [B, D]
+        pos = torch.cat([b["plastic_pos"] for b in batch], dim=0)  # [B, D]
+        neg = torch.cat([b["plastic_neg"] for b in batch], dim=0)  # [B, D]
         out = {"mode": "pair", "enzyme_graph": enzyme_batch, "plastic_pos": pos, "plastic_neg": neg}
         if "enzyme_id" in batch[0]:
             out["enzyme_id"] = [b["enzyme_id"] for b in batch]
@@ -403,6 +516,7 @@ def collate_pairs(batch: List[Dict[str, Any]]) -> Dict[str, Any]:
             out["plastic_neg_name"] = [b["plastic_neg_name"] for b in batch]
         return out
 
-    # listwise：这里每个样本的 list 长度可能不同，训练脚本里通常会逐条处理或 padding
-    # 为保持简单，我们原样返回 list（不做 padding），由训练脚本循环内部样本处理。
+    # Listwise: each sample's list length may differ, training scripts usually process
+    # item by item or with padding. For simplicity, we return list as-is (no padding),
+    # training script handles internal sample processing in loops.
     return {"mode": "list", "enzyme_graph": enzyme_batch, "items": batch}
