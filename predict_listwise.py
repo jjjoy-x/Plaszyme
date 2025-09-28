@@ -34,7 +34,7 @@ python predict_enhanced.py
 Author
 ------
 Shuleihe (School of Science, Xi'an Jiaotong-Liverpool University)
-XJTLU_AI_China — 2025 iGEM Team Plaszyme
+XJTLU_AI_China — iGEM 2025
 """
 
 from __future__ import annotations
@@ -58,9 +58,9 @@ import pandas as pd
 
 # Model and data path configuration
 MODEL_PATH = "/Users/shulei/PycharmProjects/Plaszyme/train_script/train_results/gnn_bilinear/best_bilinear.pt"
-PDB_ROOT = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pdb"
 PT_OUT_ROOT = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pt"
 SDF_ROOT = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf_new"
+PDB_ROOT = os.getcwd()
 
 # Prediction configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -71,23 +71,25 @@ INCLUDE_CONFIDENCE = True  # Include confidence and additional metrics
 # Plastic list configuration
 USE_ALL_SDF_PLASTICS = True  # Use all plastics from SDF directory
 DEFAULT_PLASTICS = [
-    "PET", "PE", "PP", "PS", "PVC", "PMMA", "PC", "PU", "PA6", "PA66",
-    "PBAT", "PBS", "PLA", "PHB", "LDPE", "HDPE", "ABS", "PTFE"
+    'ECOFLEX', 'Impranil', 'LDPE', 'NR', 'Nylon', 'O-PVA', 'P(3HB-co-3MP)', 'P3HP', 'P3HV',
+    'P4HB', 'PA', 'PBAT', 'PBS', 'PBSA', 'PBSeT', 'PCL', 'PE', 'PEA', 'PEF', 'PEG', 'PES',
+    'PET', 'PHB', 'PHBH', 'PHBV', 'PHBVH', 'PHO', 'PHPV', 'PHV', 'PLA', 'PMCL', 'PPL', 'PS', 'PU', 'PVA'
 ]  # Used when USE_ALL_SDF_PLASTICS=False
 
+# 若提供，则忽略 USE_ALL_SDF_PLASTICS/SDF_ROOT/DEFAULT_PLASTICS
+# 支持：
+#  - "/path/to/one.sdf" 或 "/path/to/one.mol"      单个文件
+#  - ["/a.sdf", "/b.mol"]                           文件列表
+#  - "/path/to/sdf_folder"                          文件夹路径（遍历其中的 .sdf/.mol）
+PLASTIC_INPUT: Optional[object] = None
+
+
 # PDB file configuration - choose one approach
-# Method 1: Single PDB file
-SINGLE_PDB = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pdb/X0045.pdb"
-
-# Method 2: PDB file list
-PDB_LIST = [
-    # Example:
-    # "/path/to/enzyme1.pdb",
-    # "/path/to/enzyme2.pdb",
-]
-
-# Method 3: Batch process from directory
-PDB_DIRECTORY = None  # Example: "/path/to/pdb_directory/"
+# Support：
+#  - "/path/to/one.pdb"              单个文件
+#  - ["/path/to/one.pdb", "/path/two.pdb"]   文件列表
+#  - "/path/to/pdb_folder"           文件夹路径
+PDB_INPUT = ["/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pdb/X0001.pdb"]
 
 # Logging configuration
 VERBOSE = True  # Show detailed logs
@@ -358,39 +360,49 @@ class PlaszymePredictor:
                 raise ValueError(
                     f"Failed to process PDB file {pdb_path}. Build failed: {e}, cache loading also failed: {e2}")
 
-    def _get_plastic_features(self, plastic_names: List[str]) -> Tuple[torch.Tensor, List[str]]:
-        """Extract plastic features."""
+    def _get_plastic_features(self, plastic_items: List[str]) -> Tuple[torch.Tensor, List[str]]:
+        """
+        提取塑料特征：plastic_items 既可为‘塑料名’，也可为‘显式文件路径(.sdf/.mol)’。
+        - 若是文件路径：直接读取该文件
+        - 若是名字：从 SDF_ROOT/{name}.sdf 或 .mol 中寻找
+        返回: (features_tensor [N, D], names [N])
+        """
         features = []
         valid_names = []
 
-        for name in plastic_names:
+        for item in plastic_items:
             try:
-                # Try extracting features from SDF files  尝试从SDF文件获取特征
-                sdf_path = os.path.join(SDF_ROOT, f"{name}.sdf")
-                mol_path = os.path.join(SDF_ROOT, f"{name}.mol")
-
-                feat = None
-                if os.path.exists(sdf_path):
-                    feat = self.plastic_featurizer.featurize_file(sdf_path)
-                elif os.path.exists(mol_path):
-                    feat = self.plastic_featurizer.featurize_file(mol_path)
+                if os.path.isfile(item) and item.lower().endswith((".sdf", ".mol")):
+                    # 显式文件路径
+                    feat = self.plastic_featurizer.featurize_file(item)
+                    name = os.path.splitext(os.path.basename(item))[0]
                 else:
-                    print(f"[PLASTIC] Molecular file not found | name={name}")
-                    continue
+                    # 当作“塑料名”在 SDF_ROOT 中查找
+                    name = item
+                    sdf_path = os.path.join(SDF_ROOT, f"{name}.sdf")
+                    mol_path = os.path.join(SDF_ROOT, f"{name}.mol")
+                    feat = None
+                    if os.path.exists(sdf_path):
+                        feat = self.plastic_featurizer.featurize_file(sdf_path)
+                    elif os.path.exists(mol_path):
+                        feat = self.plastic_featurizer.featurize_file(mol_path)
+                    else:
+                        print(f"[PLASTIC] Molecular file not found | name={name}")
+                        continue
 
                 if feat is not None:
                     features.append(feat)
                     valid_names.append(name)
                 else:
-                    print(f"[PLASTIC] Feature extraction failed | name={name}")
+                    print(f"[PLASTIC] Feature extraction failed | item={item}")
 
             except Exception as e:
-                print(f"[PLASTIC] Processing error | name={name} | error={str(e)}")
+                print(f"[PLASTIC] Processing error | item={item} | error={str(e)}")
 
         if not features:
             raise ValueError("No valid plastic features extracted")
 
-        # Ensure all feature dimensions are consistent  确保所有特征维度一致
+        # 维度对齐
         max_dim = max(f.shape[0] for f in features)
         padded_features = []
         for feat in features:
@@ -524,6 +536,14 @@ class PlaszymePredictor:
         score_std = scores_np.std()
         score_mean = scores_np.mean()
 
+        if len(scores_np) == 1:
+            only_score = scores_np[0]
+            if only_score > 0:
+                results['prediction_category'] = ["High Interaction"]
+            else:
+                results['prediction_category'] = ["No Significant Interaction"]
+            return results
+
         def categorize_prediction(score, conf):
             if score > score_mean + score_std and conf > 0.1:
                 return "High Interaction"
@@ -607,33 +627,83 @@ def get_plastic_list() -> List[str]:
     else:
         return DEFAULT_PLASTICS
 
+def get_plastic_inputs() -> List[str]:
+    """
+    返回塑料“条目列表”：每个元素要么是 显式文件路径(.sdf/.mol)，要么是塑料名（用于 SDF_ROOT 中查找）。
+    若 PLASTIC_INPUT 提供，则返回文件路径列表（或由文件夹展开得到的列表），并忽略默认库。
+    若 PLASTIC_INPUT 为空，则退回 get_plastic_list()（返回的是塑料名列表）。
+    """
+    if PLASTIC_INPUT is None:
+        # 走原逻辑：返回“塑料名”列表
+        return get_plastic_list()
 
-def get_pdb_files():
-    """Get list of PDB files to process based on configuration."""
-    pdb_files = []
-
-    if SINGLE_PDB:
-        if os.path.exists(SINGLE_PDB):
-            pdb_files.append(SINGLE_PDB)
+    items: List[str] = []
+    def _add_path(p: str):
+        if os.path.isfile(p) and p.lower().endswith((".sdf", ".mol")):
+            items.append(os.path.abspath(p))
+        elif os.path.isdir(p):
+            for fn in os.listdir(p):
+                if fn.lower().endswith((".sdf", ".mol")):
+                    items.append(os.path.abspath(os.path.join(p, fn)))
         else:
-            print(f"[CONFIG] Specified PDB file not found | path={SINGLE_PDB}")
+            print(f"[PLASTIC_INPUT] Skip invalid path: {p}")
 
-    if PDB_LIST:
-        for pdb_path in PDB_LIST:
-            if os.path.exists(pdb_path):
-                pdb_files.append(pdb_path)
+    if isinstance(PLASTIC_INPUT, str):
+        _add_path(PLASTIC_INPUT)
+    elif isinstance(PLASTIC_INPUT, (list, tuple)):
+        for x in PLASTIC_INPUT:
+            _add_path(str(x))
+    else:
+        print(f"[PLASTIC_INPUT] Unsupported type: {type(PLASTIC_INPUT)}")
+        return []
+
+    # 去重并排序
+    items = sorted(list(dict.fromkeys(items)))
+    if not items:
+        print("[PLASTIC_INPUT] No valid .sdf/.mol found; fallback to SDF_ROOT/DEFAULT.")
+        return get_plastic_list()
+    print(f"[PLASTIC_INPUT] Using explicit plastic files | count={len(items)}")
+    return items
+
+def get_pdb_files(pdb_input) -> List[str]:
+    """Resolve pdb file(s) from input.
+
+    Args:
+        pdb_input: str or List[str] (file path(s) or folder path)
+
+    Returns:
+        List of pdb file paths
+    """
+    pdb_files: List[str] = []
+
+    # 字符串输入
+    if isinstance(pdb_input, str):
+        if os.path.isdir(pdb_input):
+            # 文件夹 -> 遍历所有 .pdb
+            for fn in os.listdir(pdb_input):
+                if fn.lower().endswith(".pdb"):
+                    pdb_files.append(os.path.join(pdb_input, fn))
+        elif os.path.isfile(pdb_input) and pdb_input.lower().endswith(".pdb"):
+            pdb_files.append(pdb_input)
+        else:
+            print(f"[CONFIG] Invalid PDB_INPUT path: {pdb_input}")
+        return sorted(pdb_files)
+
+    # 列表输入
+    if isinstance(pdb_input, (list, tuple)):
+        for item in pdb_input:
+            if os.path.isfile(item) and item.lower().endswith(".pdb"):
+                pdb_files.append(item)
+            elif os.path.isdir(item):
+                for fn in os.listdir(item):
+                    if fn.lower().endswith(".pdb"):
+                        pdb_files.append(os.path.join(item, fn))
             else:
-                print(f"[CONFIG] PDB file not found, skipping | path={pdb_path}")
+                print(f"[CONFIG] Skip invalid item in PDB_INPUT: {item}")
+        return sorted(list(dict.fromkeys(pdb_files)))  # 去重
 
-    if PDB_DIRECTORY:
-        if os.path.isdir(PDB_DIRECTORY):
-            for filename in os.listdir(PDB_DIRECTORY):
-                if filename.lower().endswith(('.pdb', '.PDB')):
-                    pdb_files.append(os.path.join(PDB_DIRECTORY, filename))
-        else:
-            print(f"[CONFIG] Specified PDB directory not found | path={PDB_DIRECTORY}")
-
-    return pdb_files
+    print(f"[CONFIG] Unsupported PDB_INPUT type: {type(pdb_input)}")
+    return []
 
 
 def main():
@@ -647,7 +717,7 @@ def main():
         sys.exit(1)
 
     # Get PDB files to process  获取要处理的PDB文件
-    pdb_files = get_pdb_files()
+    pdb_files = get_pdb_files(PDB_INPUT)
 
     if not pdb_files:
         print("[ERROR] No PDB files found to process, check configuration")
@@ -668,7 +738,7 @@ def main():
         os.makedirs(OUTPUT_DIR, exist_ok=True)
 
         # Get plastic list  获取塑料列表
-        plastic_list = get_plastic_list()
+        plastic_list = get_plastic_inputs()
         print(f"[MAIN] Will predict interactions | plastic_count={len(plastic_list)}")
 
         if len(pdb_files) == 1:

@@ -37,7 +37,7 @@ from __future__ import annotations
 Author
 -----
 Shuleihe (School of Science, Xi’an Jiaotong-Liverpool University)
-XJTLU_AI_China — 2025 iGEM Team Plaszyme
+XJTLU_AI_China — iGEM 2025
 """
 
 import os
