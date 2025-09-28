@@ -84,11 +84,11 @@ class TrainConfig:
     # 数据路径
     pdb_root: str = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pdb"
     pt_out_root: str = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pt"
-    sdf_root: str = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf_new"
+    sdf_root: str = "/Users/shulei/PycharmProjects/Plaszyme/data/plastics_sdf/10_mers"
     train_csv: str = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/plastics_onehot_trainset.csv"
     test_csv: str = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/plastics_onehot_testset.csv"
 
-    out_dir: str = "../train_script/train_results/gnn_gated"
+    out_dir: str = "/Users/shulei/PycharmProjects/Plaszyme/train_results"
 
     # 超参（与原脚本一致）
     emb_dim_enz: int = 128
