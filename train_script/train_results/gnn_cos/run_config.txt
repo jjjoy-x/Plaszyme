@@ -1,0 +1,72 @@
+# Plaszyme listwise training config
+time: 2025-09-27 18:52:38
+device: cpu
+enz_backbone: GNN
+[paths]
+  pdb_root: /Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pdb
+  pt_out_root: /Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pt
+  sdf_root: /Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf_new
+  train_csv: /Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/plastics_onehot_trainset.csv
+  test_csv: /Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/plastics_onehot_testset.csv
+  out_dir: ./train_results/gnn_cos
+[hparams]
+  emb_dim_enz: 128
+  emb_dim_pl: 128
+  proj_dim: 128
+  batch_size: 10
+  lr: 0.0003
+  weight_decay: 0.0001
+  epochs: 100
+  max_list_len: 10
+  temp: 0.2
+  alpha: 0.4
+  lambda_rep: 0.1
+  interaction: cos
+  bilinear_rank: 64
+  lambda_w_reg: 0.0001
+  ortho_reg: 0.0
+  var_target: 1.0
+  lambda_var: 0.001
+  lambda_center: 0.001
+  plastic_diversify: True
+  lambda_diversify: 0.05
+  seed: 42
+[dataset]
+  train_size: 309
+  val_size: 77
+  num_plastics: 34
+device: cpu
+enz_backbone: GNN
+[paths]
+  pdb_root: /Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pdb
+  pt_out_root: /Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pt
+  sdf_root: /Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf_new
+  train_csv: /Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/plastics_onehot_trainset.csv
+  test_csv: /Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/plastics_onehot_testset.csv
+  out_dir: ./train_results/gnn_cos
+[hparams]
+  emb_dim_enz: 128
+  emb_dim_pl: 128
+  proj_dim: 128
+  batch_size: 10
+  lr: 0.0003
+  weight_decay: 0.0001
+  epochs: 100
+  max_list_len: 10
+  temp: 0.2
+  alpha: 0.4
+  lambda_rep: 0.1
+  interaction: cos
+  bilinear_rank: 64
+  lambda_w_reg: 0.0001
+  ortho_reg: 0.0
+  var_target: 1.0
+  lambda_var: 0.001
+  lambda_center: 0.001
+  plastic_diversify: True
+  lambda_diversify: 0.05
+  seed: 42
+[best]
+  best_val_hit@1: 0.948051948051948
+  best_ckpt: ./train_results/gnn_cos/best_cos.pt
+  best_epoch: 88
