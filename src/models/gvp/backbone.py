@@ -23,7 +23,7 @@ API 对齐：
 
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -31,7 +31,7 @@ import torch.nn.functional as F
 from torch_geometric.data import Batch
 from torch_geometric.nn import global_mean_pool
 
-from src.models import gvp_local
+from src.models.gvp import gvp_local
 
 
 class GVPBackbone(nn.Module):

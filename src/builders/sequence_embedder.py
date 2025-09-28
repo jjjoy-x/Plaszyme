@@ -21,7 +21,7 @@ from typing import List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
-from tensorboard.compat.tensorflow_stub.tensor_shape import vector
+from tqdm import tqdm
 
 
 # ---------------------------
@@ -265,11 +265,21 @@ class ESMEmbedder(BaseProteinEmbedder):
             seqs = [_truncate(s, self.max_len, self.truncate_from) for s in sequences]
             single = False
 
-        # mini-batch embed for lists
         outs: List[torch.Tensor] = []
-        for i in range(0, len(seqs), self.batch_size):
-            chunk = seqs[i : i + self.batch_size]
-            data = [(f"seq{i+j}", s) for j, s in enumerate(chunk)]
+        iterator = range(0, len(seqs), self.batch_size)
+
+        total = len(seqs)
+        if self.verbose:
+            if total == 1:
+                # 单条也保持同一风格（可选）
+                print(f"[ESM] total_seqs=1")
+            elif total > 1:
+                print(f"[ESM] total_seqs={total}")
+
+        processed = 0
+        for i in iterator:
+            chunk = seqs[i: i + self.batch_size]
+            data = [(f"seq{i + j}", s) for j, s in enumerate(chunk)]
             labels, toks = self._tokens_from_data(data)
             toks = toks.to(self.device)
             if self.fp16:
@@ -277,7 +287,7 @@ class ESMEmbedder(BaseProteinEmbedder):
 
             # forward
             if self.repr_layer is None:
-                repr_layers = [self._model.num_layers]  # last layer
+                repr_layers = [self._model.num_layers]
                 layer_id = self._model.num_layers
             else:
                 repr_layers = [int(self.repr_layer)]
@@ -286,16 +296,23 @@ class ESMEmbedder(BaseProteinEmbedder):
             result = self._model(toks, repr_layers=repr_layers, return_contacts=False)
             reps = result["representations"][layer_id]  # [B, T, D]
 
-            # cut CLS/EOS → per-residue
             for k, (_, seq) in enumerate(data):
                 L = len(seq)
-                emb = reps[k, 1 : L + 1]  # [L, D]
+                emb = reps[k, 1: L + 1]  # 去掉CLS/EOS → [L, D]
                 if self._last_dim is None:
                     self._last_dim = emb.shape[-1]
-                outs.append(emb.detach().float().cpu())  # keep on CPU to save GPU RAM
 
+                outs.append(emb.detach().float().cpu())
+                processed += 1
+
+                # 每 10 条或最后一条打印一次（英文 + 你要的字段）
+                if self.verbose and (processed % 10 == 0 or processed == total):
+                    dim_show = self._last_dim if self._last_dim is not None else emb.shape[-1]
+                    print(f"[ESM] seq {processed}/{total} | len={L} | dim={dim_show}")
+
+        # 末尾补充一行总维度/总数量（与之前风格一致）
         if self.verbose and self._last_dim is not None:
-            print(f"[ESM] repr_dim={self._last_dim}, n_seq={len(seqs)}")
+            print(f"[ESM] repr_dim={self._last_dim}, n_seq={total}")
 
         if single:
             return outs[0]
@@ -442,14 +459,30 @@ class PhysChemEmbedder(BaseProteinEmbedder):
                 - single: [L, D]
                 - list: List of [L, D]
         """
+        verbose = bool(getattr(self, "verbose", True))  # 不修改类结构，尽量最小侵入
+
         if isinstance(sequences, str):
             seq = _truncate(sequences, self.max_len, self.truncate_from)
-            return self._embed_one(seq).to(self.device)
+            emb = self._embed_one(seq)  # [L, D] on CPU
+            if verbose:
+                print(f"[PhysChem] total_seqs=1")
+                print(f"[PhysChem] seq 1/1 | len={emb.shape[0]} | dim={emb.shape[1]}")
+            return emb.to(self.device)
+
+        # list case
+        total = len(sequences)
+        if verbose:
+            print(f"[PhysChem] total_seqs={total}")
 
         outs: List[torch.Tensor] = []
-        for seq in sequences:
+        for idx, seq in enumerate(sequences, start=1):
             seq = _truncate(seq, self.max_len, self.truncate_from)
-            outs.append(self._embed_one(seq).to(self.device))
+            emb = self._embed_one(seq)  # [L, D] on CPU
+            outs.append(emb.to(self.device))
+
+            if verbose and (idx % 10 == 0 or idx == total):
+                print(f"[PhysChem] seq {idx}/{total} | len={emb.shape[0]} | dim={emb.shape[1]}")
+
         return outs
 
     # ---------- helpers ----------

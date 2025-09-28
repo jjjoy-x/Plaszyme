@@ -189,10 +189,10 @@ def evaluate_by_bucket(
 # ===================== 示例调用 =====================
 if __name__ == "__main__":
     # 这里替换成你的实际路径
-    pred_csv = "/Users/shulei/PycharmProjects/Plaszyme/train_script/listwise_cos_gvp/test_score_matrix.csv"     # 预测分数表（含 enzyme_id 与 *.sdf 列）
+    pred_csv = "/Users/shulei/PycharmProjects/Plaszyme/train_script/train_results/gnn_hadamard/test_score_matrix.csv"     # 预测分数表（含 enzyme_id 与 *.sdf 列）
     gt_csv   = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/plastics_onehot_testset.csv"   # 真实独热表（protein_id 与不带 .sdf 的列）
     bucket_csv = "/Users/shulei/PycharmProjects/Plaszyme/dataset/testset.csv"             # 难度表（protein_id,bucket_by_nn_all）
-    out_csv = "/Users/shulei/PycharmProjects/Plaszyme/train_script/listwise_cos_gvp/listwise_cos_gvp.csv"
+    out_csv = "/Users/shulei/PycharmProjects/Plaszyme/train_script/train_results/gnn_hadamard/final_metrics.csv"
 
     df_metrics = evaluate_by_bucket(
         pred_csv=pred_csv,
