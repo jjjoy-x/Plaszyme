@@ -1,14 +1,43 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Plaszyme — 预测脚本
+Plaszyme — Enhanced Prediction Script
 ====================================================
 
-该脚本基于训练好的模型权重，对输入的PDB文件进行酶-塑料相互作用预测。
+This script performs enzyme-plastic interaction prediction based on trained
+model weights, with comprehensive confidence assessment and detailed prediction
+analysis.
 
-作者：Shuleihe (School of Science, Xi'an Jiaotong-Liverpool University)
+Key Features
+------------
+- Load pre-trained models with lazy construction handling
+- Support for multiple backbone architectures (GNN/GVP/MLP)
+- Automatic plastic feature extraction from SDF/MOL files
+- Confidence metrics and uncertainty quantification
+- Batch processing capabilities
+- Detailed prediction analysis and categorization
+
+Outputs
+-------
+- Prediction scores with confidence metrics
+- Relative strength and percentile rankings
+- Embedding similarity analysis
+- Prediction category classification
+- Comprehensive CSV reports
+
+Usage
+-----
+# Configure paths and settings at the top of the script
+# Then run directly:
+python predict_enhanced.py
+
+Author
+------
+Shuleihe (School of Science, Xi'an Jiaotong-Liverpool University)
 XJTLU_AI_China — 2025 iGEM Team Plaszyme
 """
+
+from __future__ import annotations
 
 import logging
 import os
@@ -24,48 +53,50 @@ import torch.nn as nn
 import pandas as pd
 
 # ===============================================================================
-# 配置参数 - 在此处修改您的设置
+# Configuration Parameters - Modify Your Settings Here
 # ===============================================================================
 
-# 模型和数据路径配置
-MODEL_PATH = "/Users/shulei/PycharmProjects/Plaszyme/train_script/train_results/gnn_cos/best_cos.pt"  # 训练好的模型路径
-PDB_ROOT = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pdb"  # PDB文件根目录
-PT_OUT_ROOT = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pt"  # 图文件输出目录
-SDF_ROOT = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf_new"  # SDF文件目录
+# Model and data path configuration
+MODEL_PATH = "/Users/shulei/PycharmProjects/Plaszyme/train_script/train_results/gnn_bilinear/best_bilinear.pt"
+PDB_ROOT = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pdb"
+PT_OUT_ROOT = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pt"
+SDF_ROOT = "/Users/shulei/PycharmProjects/Plaszyme/plastic/mols_for_unimol_10_sdf_new"
 
-# 预测配置
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"  # 计算设备
-TOP_K = 10  # 返回前K个最高分数的结果
-OUTPUT_DIR = "./prediction_results/1"  # 输出目录
+# Prediction configuration
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+TOP_K = 10  # Return top K highest scoring results
+OUTPUT_DIR = "./prediction_results"
+INCLUDE_CONFIDENCE = True  # Include confidence and additional metrics
 
-# 要预测的塑料列表配置
-USE_ALL_SDF_PLASTICS = True  # 是否使用SDF目录中的全部塑料
+# Plastic list configuration
+USE_ALL_SDF_PLASTICS = True  # Use all plastics from SDF directory
 DEFAULT_PLASTICS = [
-    "PET", "PE",
-]  # 当USE_ALL_SDF_PLASTICS=False时使用的塑料列表
+    "PET", "PE", "PP", "PS", "PVC", "PMMA", "PC", "PU", "PA6", "PA66",
+    "PBAT", "PBS", "PLA", "PHB", "LDPE", "HDPE", "ABS", "PTFE"
+]  # Used when USE_ALL_SDF_PLASTICS=False
 
-# 要预测的PDB文件配置
-# 方式1: 单个PDB文件
-SINGLE_PDB = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pdb/X0045.pdb"  # 例如: "/path/to/enzyme.pdb"
+# PDB file configuration - choose one approach
+# Method 1: Single PDB file
+SINGLE_PDB = "/Users/shulei/PycharmProjects/Plaszyme/dataset/predicted_xid/pdb/X0045.pdb"
 
-# 方式2: PDB文件列表
+# Method 2: PDB file list
 PDB_LIST = [
-    # 例如:
+    # Example:
     # "/path/to/enzyme1.pdb",
     # "/path/to/enzyme2.pdb",
 ]
 
-# 方式3: 从目录批量处理
-PDB_DIRECTORY = None  # 例如: "/path/to/pdb_directory/"
+# Method 3: Batch process from directory
+PDB_DIRECTORY = None  # Example: "/path/to/pdb_directory/"
 
-# 日志配置
-VERBOSE = True  # 是否显示详细日志
+# Logging configuration
+VERBOSE = True  # Show detailed logs
 
 # ===============================================================================
-# 以下是核心代码，一般无需修改
+# Core Implementation - Generally No Need to Modify Below
 # ===============================================================================
 
-# 项目内部依赖
+# Project internal dependencies
 from src.builders.gnn_builder import GNNProteinGraphBuilder, BuilderConfig as GNNBuilderConfig
 from src.builders.gvp_builder import GVPProteinGraphBuilder, BuilderConfig as GVPBuilderConfig
 from src.models.gnn.backbone import GNNBackbone
@@ -77,9 +108,16 @@ from src.models.interaction_head import InteractionHead
 
 
 class TwinProjector(nn.Module):
-    """蛋白/塑料各自线性投影到同一空间"""
+    """Dual linear projection for protein and plastic features to shared space."""
 
     def __init__(self, in_e: int, in_p: int, out: int):
+        """Initialize projector.
+
+        Args:
+            in_e: Input dimension for enzyme features
+            in_p: Input dimension for plastic features
+            out: Output dimension for shared space
+        """
         super().__init__()
         self.proj_e = nn.Linear(in_e, out, bias=False)
         self.proj_p = nn.Linear(in_p, out, bias=False)
@@ -87,11 +125,20 @@ class TwinProjector(nn.Module):
         nn.init.xavier_uniform_(self.proj_p.weight)
 
     def forward(self, e: torch.Tensor, p: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Project enzyme and plastic features to shared space.
+
+        Args:
+            e: Enzyme features [B, De]
+            p: Plastic features [N, Dp]
+
+        Returns:
+            Tuple of projected features (enzyme, plastic)
+        """
         return self.proj_e(e), self.proj_p(p)
 
 
 class PlaszymePredictor:
-    """Plaszyme预测器类"""
+    """Enhanced Plaszyme predictor with confidence assessment."""
 
     def __init__(self,
                  model_path: str,
@@ -99,43 +146,42 @@ class PlaszymePredictor:
                  pt_out_root: str,
                  device: str = "cpu",
                  plastic_config_path: Optional[str] = None):
-        """
-        初始化预测器
+        """Initialize predictor.
 
         Args:
-            model_path: 训练好的模型权重文件路径
-            pdb_root: PDB文件根目录
-            pt_out_root: 图文件输出目录
-            device: 计算设备
-            plastic_config_path: 塑料特征化配置文件路径
+            model_path: Path to trained model weights
+            pdb_root: Root directory for PDB files
+            pt_out_root: Output directory for graph files
+            device: Computing device (cuda/cpu)
+            plastic_config_path: Optional plastic featurizer config path
         """
         self.device = device
         self.model_path = model_path
         self.pdb_root = pdb_root
         self.pt_out_root = pt_out_root
 
-        # 加载模型配置和权重
+        # Load model configuration and weights
         self._load_model()
 
-        # 初始化塑料特征化器
+        # Initialize plastic featurizer
         self.plastic_featurizer = PlasticFeaturizer(config_path=plastic_config_path)
 
-        # 初始化蛋白质图构建器
+        # Initialize protein graph builder
         self._init_protein_builder()
 
-        logging.info(f"预测器初始化完成，使用设备: {self.device}")
+        print(f"[PREDICTOR] Initialization complete | device={self.device}")
 
     def _load_model(self):
-        """加载训练好的模型，处理懒构建问题"""
+        """Load trained model with lazy construction handling."""
         checkpoint = torch.load(self.model_path, map_location=self.device)
         self.cfg = checkpoint["cfg"]
 
-        logging.info(f"模型配置: {self.cfg}")
+        print(f"[MODEL] Config loaded | {self.cfg}")
 
-        # 预先构建模型架构（延迟实际权重加载）
+        # Pre-build model architecture (defer actual weight loading)
         self._build_model_architecture()
 
-        # 保存权重字典，稍后在第一次前向传播后加载
+        # Save weight dictionaries for later loading after lazy construction
         self.saved_weights = {
             "enzyme_backbone": checkpoint["enzyme_backbone"],
             "plastic_tower": checkpoint["plastic_tower"],
@@ -144,17 +190,17 @@ class PlaszymePredictor:
         }
 
         self._weights_loaded = False
-        logging.info(f"成功加载模型检查点: {self.model_path}")
+        print(f"[MODEL] Checkpoint loaded successfully")
 
     def _build_model_architecture(self):
-        """构建模型架构（不加载权重）"""
-        # 处理可能的键名不一致问题
+        """Build model architecture without loading weights."""
+        # Handle potential key name inconsistencies  处理可能的键名不一致问题
         backbone_type = self.cfg.get("backbone") or self.cfg.get("back", "GNN")
         emb_dim_enz = self.cfg["emb_dim_enz"]
         emb_dim_pl = self.cfg["emb_dim_pl"]
         proj_dim = self.cfg["proj_dim"]
 
-        # 构建蛋白质主干网络（使用懒构建）
+        # Build protein backbone network (with lazy construction)  构建蛋白质主干网络（使用懒构建）
         if backbone_type == "GNN":
             self.enzyme_backbone = GNNBackbone(
                 conv_type="gcn",
@@ -180,12 +226,12 @@ class PlaszymePredictor:
                 feature_priority=["seq_x", "x"]
             ).to(self.device)
 
-        # 塑料相关模型稍后构建（需要知道塑料特征维度）
+        # Plastic-related models built later (need plastic feature dimensions)  塑料相关模型稍后构建
         self.plastic_tower = None
         self.projector = None
         self.inter_head = None
 
-        # 保存配置用于后续构建
+        # Save config for subsequent construction  保存配置用于后续构建
         self._emb_dim_enz = emb_dim_enz
         self._emb_dim_pl = emb_dim_pl
         self._proj_dim = proj_dim
@@ -193,8 +239,8 @@ class PlaszymePredictor:
         self._bilinear_rank = self.cfg.get("bilinear_rank", 64)
 
     def _init_protein_builder(self):
-        """初始化蛋白质图构建器"""
-        # 处理可能的键名不一致问题
+        """Initialize protein graph builder."""
+        # Handle potential key name inconsistencies  处理可能的键名不一致问题
         backbone_type = self.cfg.get("backbone") or self.cfg.get("back", "GNN")
 
         if backbone_type == "GNN":
@@ -223,7 +269,7 @@ class PlaszymePredictor:
             self.protein_builder = GNNProteinGraphBuilder(builder_cfg, edge_mode="none")
 
     def _ensure_plastic_models_built(self, plastic_dim: int):
-        """确保塑料相关模型已构建"""
+        """Ensure plastic-related models are built."""
         if self.plastic_tower is None:
             self.plastic_tower = PolymerTower(
                 in_dim=plastic_dim,
@@ -245,20 +291,21 @@ class PlaszymePredictor:
             ).to(self.device)
 
     def _load_weights_after_forward(self):
-        """在第一次前向传播后加载权重"""
+        """Load weights after first forward pass."""
         if not self._weights_loaded:
+            # For lazy construction models, need to load weights after construction complete
             # 对于懒构建的模型，需要在构建完成后才能加载权重
             if self.enzyme_backbone._built if hasattr(self.enzyme_backbone, '_built') else True:
                 self.enzyme_backbone.load_state_dict(self.saved_weights["enzyme_backbone"], strict=True)
-                logging.info("已加载enzyme_backbone权重")
+                print("[WEIGHTS] Enzyme backbone weights loaded")
 
             if self.plastic_tower is not None:
                 self.plastic_tower.load_state_dict(self.saved_weights["plastic_tower"], strict=True)
                 self.projector.load_state_dict(self.saved_weights["projector"], strict=True)
                 self.inter_head.load_state_dict(self.saved_weights["inter_head"], strict=True)
-                logging.info("已加载塑料相关模型权重")
+                print("[WEIGHTS] Plastic models weights loaded")
 
-            # 设置为评估模式
+            # Set to evaluation mode
             self.enzyme_backbone.eval()
             if self.plastic_tower is not None:
                 self.plastic_tower.eval()
@@ -268,31 +315,31 @@ class PlaszymePredictor:
             self._weights_loaded = True
 
     def _process_protein(self, pdb_path: str) -> torch.Tensor:
-        """处理蛋白质PDB文件"""
+        """Process protein PDB file."""
         pdb_name = os.path.splitext(os.path.basename(pdb_path))[0]
 
         try:
-            # 使用正确的build_one方法
+            # Use correct build_one method  使用正确的build_one方法
             data, misc = self.protein_builder.build_one(pdb_path, name=pdb_name)
 
             if data is None:
-                raise ValueError(f"build_one返回了None: {pdb_path}")
+                raise ValueError(f"build_one returned None: {pdb_path}")
 
-            logging.info(f"成功构建蛋白质图: {pdb_name}")
+            print(f"[PROTEIN] Graph construction successful | name={pdb_name}")
             return data.to(self.device)
 
         except Exception as e:
-            logging.error(f"构建蛋白质图失败: {e}")
+            print(f"[PROTEIN] Graph construction failed | name={pdb_name} | error={str(e)}")
 
-            # 备用方法：尝试从缓存加载
+            # Fallback: try loading from cache  备用方法：尝试从缓存加载
             try:
                 pt_path = os.path.join(self.pt_out_root, f"{pdb_name}.pt")
                 if os.path.exists(pt_path):
                     graph = torch.load(pt_path, map_location='cpu')
-                    logging.info(f"从缓存加载图: {pt_path}")
+                    print(f"[PROTEIN] Loaded from cache | path={pt_path}")
                     return graph.to(self.device)
                 else:
-                    # 尝试其他可能的文件名模式
+                    # Try alternative file name patterns  尝试其他可能的文件名模式
                     possible_names = [
                         f"{pdb_name}_graph.pt",
                         f"{pdb_name}_processed.pt",
@@ -302,22 +349,23 @@ class PlaszymePredictor:
                         alt_path = os.path.join(self.pt_out_root, alt_name)
                         if os.path.exists(alt_path):
                             graph = torch.load(alt_path, map_location='cpu')
-                            logging.info(f"从缓存加载图: {alt_path}")
+                            print(f"[PROTEIN] Loaded from cache | path={alt_path}")
                             return graph.to(self.device)
 
-                    raise FileNotFoundError(f"找不到缓存文件: {pt_path}")
+                    raise FileNotFoundError(f"Cache file not found: {pt_path}")
 
             except Exception as e2:
-                raise ValueError(f"无法处理PDB文件 {pdb_path}。构建失败: {e}，缓存加载也失败: {e2}")
+                raise ValueError(
+                    f"Failed to process PDB file {pdb_path}. Build failed: {e}, cache loading also failed: {e2}")
 
     def _get_plastic_features(self, plastic_names: List[str]) -> Tuple[torch.Tensor, List[str]]:
-        """获取塑料特征"""
+        """Extract plastic features."""
         features = []
         valid_names = []
 
         for name in plastic_names:
             try:
-                # 尝试从SDF文件获取特征
+                # Try extracting features from SDF files  尝试从SDF文件获取特征
                 sdf_path = os.path.join(SDF_ROOT, f"{name}.sdf")
                 mol_path = os.path.join(SDF_ROOT, f"{name}.mol")
 
@@ -327,23 +375,22 @@ class PlaszymePredictor:
                 elif os.path.exists(mol_path):
                     feat = self.plastic_featurizer.featurize_file(mol_path)
                 else:
-                    logging.warning(f"找不到塑料 {name} 的分子文件 (.sdf/.mol)")
+                    print(f"[PLASTIC] Molecular file not found | name={name}")
                     continue
 
                 if feat is not None:
                     features.append(feat)
                     valid_names.append(name)
-                    logging.debug(f"成功获取塑料 {name} 的特征，维度: {feat.shape}")
                 else:
-                    logging.warning(f"无法从文件提取塑料 {name} 的特征")
+                    print(f"[PLASTIC] Feature extraction failed | name={name}")
 
             except Exception as e:
-                logging.warning(f"处理塑料 {name} 时出错: {e}")
+                print(f"[PLASTIC] Processing error | name={name} | error={str(e)}")
 
         if not features:
-            raise ValueError("没有有效的塑料特征")
+            raise ValueError("No valid plastic features extracted")
 
-        # 确保所有特征维度一致
+        # Ensure all feature dimensions are consistent  确保所有特征维度一致
         max_dim = max(f.shape[0] for f in features)
         padded_features = []
         for feat in features:
@@ -354,102 +401,169 @@ class PlaszymePredictor:
             else:
                 padded_features.append(feat)
 
-        logging.info(f"成功获取 {len(valid_names)} 种塑料的特征，特征维度: {max_dim}")
+        print(f"[PLASTIC] Features extracted successfully | count={len(valid_names)} | dim={max_dim}")
         return torch.stack(padded_features), valid_names
 
     @torch.no_grad()
     def predict(self,
                 pdb_path: str,
                 plastic_names: Optional[List[str]] = None,
-                top_k: int = 10) -> pd.DataFrame:
-        """
-        预测单个PDB文件与塑料的相互作用
+                top_k: int = 10,
+                include_confidence: bool = True) -> pd.DataFrame:
+        """Predict enzyme-plastic interactions for single PDB file.
 
         Args:
-            pdb_path: PDB文件路径
-            plastic_names: 塑料名称列表，如果为None则使用默认列表
-            top_k: 返回前k个最高分数的结果
+            pdb_path: Path to PDB file
+            plastic_names: List of plastic names, uses default if None
+            top_k: Return top k highest scoring results
+            include_confidence: Whether to compute confidence metrics
 
         Returns:
-            包含预测结果的DataFrame
+            DataFrame containing prediction results
         """
         if not os.path.exists(pdb_path):
-            raise FileNotFoundError(f"PDB文件不存在: {pdb_path}")
+            raise FileNotFoundError(f"PDB file does not exist: {pdb_path}")
 
         if plastic_names is None:
-            plastic_names = get_plastic_list()  # 使用配置的塑料列表
+            plastic_names = get_plastic_list()
 
-        # 处理蛋白质
+        # Process protein  处理蛋白质
         protein_graph = self._process_protein(pdb_path)
 
-        # 第一次前向传播（触发懒构建）
+        # First forward pass (trigger lazy construction)  第一次前向传播（触发懒构建）
         enzyme_vec = self.enzyme_backbone(protein_graph)
 
-        # 获取塑料特征
+        # Get plastic features  获取塑料特征
         plastic_features, valid_plastic_names = self._get_plastic_features(plastic_names)
         plastic_dim = plastic_features.shape[1]
 
-        # 确保塑料模型已构建
+        # Ensure plastic models are built  确保塑料模型已构建
         self._ensure_plastic_models_built(plastic_dim)
 
-        # 在模型完全构建后加载权重
+        # Load weights after model construction complete  在模型完全构建后加载权重
         self._load_weights_after_forward()
 
-        # 重新进行前向传播（使用加载的权重）
+        # Re-run forward pass (using loaded weights)  重新进行前向传播（使用加载的权重）
         enzyme_vec = self.enzyme_backbone(protein_graph)
 
-        # 移动到设备
+        # Move to device
         plastic_features = plastic_features.to(self.device)
 
-        # 前向传播
+        # Forward pass
         plastic_vec = self.plastic_tower(plastic_features)
         z_e, z_p = self.projector(enzyme_vec, plastic_vec)
 
-        # 计算相互作用分数
+        # Compute interaction scores  计算相互作用分数
         scores = self.inter_head.score(z_e, z_p)
-        scores = scores.cpu().numpy()
+        scores_np = scores.cpu().numpy()
 
-        # 创建结果DataFrame
+        # Create base results DataFrame  创建基础结果DataFrame
         results = pd.DataFrame({
             'plastic_name': valid_plastic_names,
-            'interaction_score': scores
+            'interaction_score': scores_np
         })
 
-        # 按分数降序排列
+        # Add confidence and additional metrics  添加置信度和额外指标
+        if include_confidence:
+            results = self._add_confidence_metrics(results, scores, z_e, z_p)
+
+        # Sort by descending score  按分数降序排列
         results = results.sort_values('interaction_score', ascending=False)
         results = results.reset_index(drop=True)
 
-        # 添加排名
+        # Add ranking
         results['rank'] = range(1, len(results) + 1)
 
-        # 返回前k个结果
+        # Reorder columns
+        if include_confidence:
+            column_order = ['rank', 'plastic_name', 'interaction_score', 'confidence_score',
+                            'relative_strength', 'score_percentile', 'embedding_similarity', 'prediction_category']
+        else:
+            column_order = ['rank', 'plastic_name', 'interaction_score']
+
+        results = results[column_order]
+
+        # Return top k results
         if top_k > 0:
             results = results.head(top_k)
+
+        return results
+
+    def _add_confidence_metrics(self, results: pd.DataFrame, scores: torch.Tensor,
+                                z_e: torch.Tensor, z_p: torch.Tensor) -> pd.DataFrame:
+        """Add confidence and additional evaluation metrics."""
+        scores_np = scores.cpu().numpy()
+
+        # 1. Confidence score (based on softmax probability)  置信度分数（基于softmax概率）
+        softmax_probs = torch.softmax(scores / 0.1, dim=0).cpu().numpy()  # temperature=0.1 for sharper distribution
+        results['confidence_score'] = softmax_probs
+
+        # 2. Relative strength (relative to maximum score)  相对强度（相对于最高分的比例）
+        max_score = scores_np.max()
+        min_score = scores_np.min()
+        if max_score != min_score:
+            relative_strength = (scores_np - min_score) / (max_score - min_score)
+        else:
+            relative_strength = np.ones_like(scores_np)
+        results['relative_strength'] = relative_strength
+
+        # 3. Score percentiles  分数百分位数
+        percentiles = []
+        for score in scores_np:
+            percentile = (scores_np < score).sum() / len(scores_np) * 100
+            percentiles.append(percentile)
+        results['score_percentile'] = percentiles
+
+        # 4. Embedding similarity (cosine similarity)  嵌入相似度（余弦相似度）
+        z_e_norm = torch.nn.functional.normalize(z_e, dim=-1)  # [1, D]
+        z_p_norm = torch.nn.functional.normalize(z_p, dim=-1)  # [N, D]
+        cosine_sim = torch.mm(z_e_norm, z_p_norm.t()).squeeze(0).cpu().numpy()  # [N]
+        results['embedding_similarity'] = cosine_sim
+
+        # 5. Prediction categories (based on score distribution)  预测类别（基于分数分布）
+        score_std = scores_np.std()
+        score_mean = scores_np.mean()
+
+        def categorize_prediction(score, conf):
+            if score > score_mean + score_std and conf > 0.1:
+                return "High Interaction"
+            elif score > score_mean and conf > 0.05:
+                return "Medium Interaction"
+            elif score > score_mean - score_std:
+                return "Low Interaction"
+            else:
+                return "No Significant Interaction"
+
+        results['prediction_category'] = [
+            categorize_prediction(score, conf)
+            for score, conf in zip(scores_np, softmax_probs)
+        ]
 
         return results
 
     def predict_batch(self,
                       pdb_paths: List[str],
                       plastic_names: Optional[List[str]] = None,
-                      top_k: int = 10) -> Dict[str, pd.DataFrame]:
-        """批量预测多个PDB文件"""
+                      top_k: int = 10,
+                      include_confidence: bool = True) -> Dict[str, pd.DataFrame]:
+        """Batch predict multiple PDB files."""
         results = {}
 
         for pdb_path in pdb_paths:
             pdb_name = os.path.splitext(os.path.basename(pdb_path))[0]
             try:
-                result = self.predict(pdb_path, plastic_names, top_k)
+                result = self.predict(pdb_path, plastic_names, top_k, include_confidence)
                 results[pdb_name] = result
-                logging.info(f"成功预测 {pdb_name}")
+                print(f"[BATCH] Prediction successful | name={pdb_name}")
             except Exception as e:
-                logging.error(f"预测 {pdb_name} 时出错: {e}")
+                print(f"[BATCH] Prediction failed | name={pdb_name} | error={str(e)}")
                 results[pdb_name] = None
 
         return results
 
 
 def setup_logging(verbose: bool = False):
-    """设置日志"""
+    """Setup logging configuration."""
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
         level=level,
@@ -459,35 +573,35 @@ def setup_logging(verbose: bool = False):
 
 
 def get_all_sdf_plastics(sdf_root: str) -> List[str]:
-    """从SDF目录获取所有可用的塑料名称"""
+    """Get all available plastic names from SDF directory."""
     plastic_names = []
 
     if not os.path.isdir(sdf_root):
-        logging.warning(f"SDF目录不存在: {sdf_root}")
+        print(f"[SDF] Directory not found | path={sdf_root}")
         return plastic_names
 
     try:
         for filename in os.listdir(sdf_root):
             if filename.lower().endswith(('.sdf', '.mol')):
-                # 移除文件扩展名作为塑料名称
+                # Remove file extension as plastic name  移除文件扩展名作为塑料名称
                 plastic_name = os.path.splitext(filename)[0]
                 plastic_names.append(plastic_name)
 
-        plastic_names.sort()  # 按字母顺序排序
-        logging.info(f"从SDF目录找到 {len(plastic_names)} 种塑料: {plastic_names}")
+        plastic_names.sort()  # Sort alphabetically
+        print(f"[SDF] Plastics discovered | count={len(plastic_names)} | names={plastic_names}")
         return plastic_names
 
     except Exception as e:
-        logging.error(f"读取SDF目录时出错: {e}")
+        print(f"[SDF] Directory read error | error={str(e)}")
         return []
 
 
 def get_plastic_list() -> List[str]:
-    """根据配置获取要预测的塑料列表"""
+    """Get plastic list based on configuration."""
     if USE_ALL_SDF_PLASTICS:
         plastics = get_all_sdf_plastics(SDF_ROOT)
         if not plastics:
-            logging.warning("无法从SDF目录获取塑料列表，使用默认列表")
+            print("[CONFIG] Unable to get plastics from SDF directory, using default list")
             return DEFAULT_PLASTICS
         return plastics
     else:
@@ -495,21 +609,21 @@ def get_plastic_list() -> List[str]:
 
 
 def get_pdb_files():
-    """根据配置获取要处理的PDB文件列表"""
+    """Get list of PDB files to process based on configuration."""
     pdb_files = []
 
     if SINGLE_PDB:
         if os.path.exists(SINGLE_PDB):
             pdb_files.append(SINGLE_PDB)
         else:
-            logging.error(f"指定的PDB文件不存在: {SINGLE_PDB}")
+            print(f"[CONFIG] Specified PDB file not found | path={SINGLE_PDB}")
 
     if PDB_LIST:
         for pdb_path in PDB_LIST:
             if os.path.exists(pdb_path):
                 pdb_files.append(pdb_path)
             else:
-                logging.warning(f"PDB文件不存在，跳过: {pdb_path}")
+                print(f"[CONFIG] PDB file not found, skipping | path={pdb_path}")
 
     if PDB_DIRECTORY:
         if os.path.isdir(PDB_DIRECTORY):
@@ -517,32 +631,32 @@ def get_pdb_files():
                 if filename.lower().endswith(('.pdb', '.PDB')):
                     pdb_files.append(os.path.join(PDB_DIRECTORY, filename))
         else:
-            logging.error(f"指定的PDB目录不存在: {PDB_DIRECTORY}")
+            print(f"[CONFIG] Specified PDB directory not found | path={PDB_DIRECTORY}")
 
     return pdb_files
 
 
 def main():
-    """主函数"""
+    """Main function."""
     setup_logging(VERBOSE)
     warnings.filterwarnings("ignore", category=UserWarning)
 
-    # 检查模型文件
+    # Check model file  检查模型文件
     if not os.path.exists(MODEL_PATH):
-        logging.error(f"模型文件不存在: {MODEL_PATH}")
+        print(f"[ERROR] Model file not found | path={MODEL_PATH}")
         sys.exit(1)
 
-    # 获取要处理的PDB文件
+    # Get PDB files to process  获取要处理的PDB文件
     pdb_files = get_pdb_files()
 
     if not pdb_files:
-        logging.error("没有找到要处理的PDB文件，请检查配置")
+        print("[ERROR] No PDB files found to process, check configuration")
         sys.exit(1)
 
-    logging.info(f"找到 {len(pdb_files)} 个PDB文件待处理")
+    print(f"[MAIN] PDB files discovered | count={len(pdb_files)}")
 
     try:
-        # 初始化预测器
+        # Initialize predictor  初始化预测器
         predictor = PlaszymePredictor(
             model_path=MODEL_PATH,
             pdb_root=PDB_ROOT,
@@ -550,52 +664,82 @@ def main():
             device=DEVICE
         )
 
-        # 创建输出目录
+        # Create output directory
         os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-        # 获取塑料列表
+        # Get plastic list  获取塑料列表
         plastic_list = get_plastic_list()
-        logging.info(f"将预测 {len(plastic_list)} 种塑料的相互作用")
+        print(f"[MAIN] Will predict interactions | plastic_count={len(plastic_list)}")
 
         if len(pdb_files) == 1:
-            # 单个文件预测
+            # Single file prediction  单个文件预测
             pdb_path = pdb_files[0]
             result = predictor.predict(
                 pdb_path=pdb_path,
                 plastic_names=plastic_list,
-                top_k=TOP_K
+                top_k=TOP_K,
+                include_confidence=INCLUDE_CONFIDENCE
             )
 
             pdb_name = os.path.splitext(os.path.basename(pdb_path))[0]
-            print(f"\n=== {pdb_name} 预测结果 ===")
-            print(result.to_string(index=False))
+            print(f"\n=== {pdb_name} Prediction Results ===")
 
-            # 保存结果
+            # Adjust display format based on confidence information
+            if INCLUDE_CONFIDENCE:
+                print("Detailed prediction information:")
+                print(result.to_string(index=False, float_format='%.4f'))
+
+                # Output interpretive summary  输出解释性总结
+                print(f"\nPrediction Summary:")
+                top_result = result.iloc[0]
+                print(f"• Best matching plastic: {top_result['plastic_name']}")
+                print(f"• Interaction score: {top_result['interaction_score']:.4f}")
+                print(f"• Confidence: {top_result['confidence_score']:.4f}")
+                print(f"• Prediction category: {top_result['prediction_category']}")
+                print(f"• Embedding similarity: {top_result['embedding_similarity']:.4f}")
+
+                # Category statistics  分类统计
+                categories = result['prediction_category'].value_counts()
+                print(f"\nCategory Distribution:")
+                for category, count in categories.items():
+                    print(f"• {category}: {count} plastics")
+            else:
+                print(result.to_string(index=False, float_format='%.4f'))
+
+            # Save results
             output_path = os.path.join(OUTPUT_DIR, f"{pdb_name}_predictions.csv")
             result.to_csv(output_path, index=False)
-            print(f"\n结果已保存到: {output_path}")
+            print(f"\nResults saved to: {output_path}")
 
         else:
-            # 批量预测
+            # Batch prediction  批量预测
             results = predictor.predict_batch(
                 pdb_paths=pdb_files,
                 plastic_names=plastic_list,
-                top_k=TOP_K
+                top_k=TOP_K,
+                include_confidence=INCLUDE_CONFIDENCE
             )
 
-            # 输出和保存结果
+            # Output and save results
             for pdb_name, result in results.items():
                 if result is not None:
-                    print(f"\n=== {pdb_name} 预测结果 ===")
-                    print(result.to_string(index=False))
+                    print(f"\n=== {pdb_name} Prediction Results ===")
+                    if INCLUDE_CONFIDENCE:
+                        print(result.to_string(index=False, float_format='%.4f'))
+                        # Output brief summary
+                        top_result = result.iloc[0]
+                        print(
+                            f"Best match: {top_result['plastic_name']} (score: {top_result['interaction_score']:.4f}, confidence: {top_result['confidence_score']:.4f})")
+                    else:
+                        print(result.to_string(index=False, float_format='%.4f'))
 
                     output_path = os.path.join(OUTPUT_DIR, f"{pdb_name}_predictions.csv")
                     result.to_csv(output_path, index=False)
 
-            print(f"\n批量预测完成，结果已保存到: {OUTPUT_DIR}")
+            print(f"\n[BATCH] Batch prediction completed | results_saved_to={OUTPUT_DIR}")
 
     except Exception as e:
-        logging.error(f"预测过程中出现错误: {e}")
+        print(f"[ERROR] Prediction process failed | error={str(e)}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
