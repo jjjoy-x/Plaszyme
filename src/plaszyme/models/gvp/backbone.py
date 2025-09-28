@@ -34,7 +34,7 @@ import torch.nn.functional as F
 from torch_geometric.data import Batch
 from torch_geometric.nn import global_mean_pool
 
-from src.plaszyme.models.gvp import gvp_local
+from plaszyme.models.gvp import gvp_local
 
 
 class GVPBackbone(nn.Module):
