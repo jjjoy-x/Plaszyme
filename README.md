@@ -44,6 +44,16 @@ This enables predictions on **previously unseen plastic molecules**, providing b
 - **Understanding recognition mechanisms**  
   Revealing structural principles of enzyme–plastic recognition to inform rational design and directed evolution.  
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Installation](#installation)
+- [Prediction](#prediction)
+- [Training](#training)
+- [Project Structure](#project-structure)
+- [Acknowledgements](#acknowledgements)
+- [License](#license)
+
 ## **Installation**
 
 ---
@@ -466,3 +476,132 @@ The script will automatically evaluate on `test_csv` using the **best** checkpoi
 - Clean PDBs reduce graph-build errors (avoid multi-model, altloc clutter).
 - Fix seeds for reproducibility.
 - Watch `emb_diag.csv` (generated internally) for embedding collapse or scale drift.
+
+## Project Structure
+
+---
+
+The repository follows a modular design to separate **core library code**, **training/evaluation scripts**, and **documentation assets**.
+
+```bash
+├── LICENSE
+├── README.md
+├── doc/
+├── environment.yml              # Conda environment specification
+├── pyproject.toml               # Python package configuration (PEP 621)
+├── data/
+│   ├── plastics_sdf/               # Polymer structure files
+│   │   ├── 10_mers/                # Polymer fragments (10-mer SDF format)
+│   │   └── 3_mers/                 # Smaller polymer fragments (3-mer MOL format)
+│   ├── processed/                  # Pre-processed graph representations
+│   │   └── graphs_pt/              # PyTorch Geometric graph tensors
+│   └── sample_pdb/                 # Example enzyme PDB structures
+├── scripts/                     # Training and prediction entry points
+│   ├── evaluate_tools/
+│   │   └── evaluate_testset.py  # Evaluation utilities for test sets
+│   ├── predict_listwise.py      # Prediction script for enzyme–plastic interactions
+│   └── train_listwise.py        # Main training script
+├── src/                         # Source code (installed as `plaszyme`)
+│   └── plaszyme/
+│       ├── builders/            # Protein graph construction modules
+│       │   ├── base_builder.py        # Base builder class (common logic)
+│       │   ├── gnn_builder.py         # Graph builder for GNN-based models
+│       │   ├── gvp_builder.py         # Graph builder for GVP (vector-scalar graphs)
+│       │   └── sequence_embedder.py   # Sequence embedding (ESM / one-hot / custom)
+│       │
+│       ├── heads/               # Residue-level supervision heads
+│       │   ├── residue_activity_head.py  # Predict residue activity/intensity
+│       │   └── residue_role_head.py      # Predict residue roles (interaction/reactant/spectator)
+│       │
+│       ├── models/              # Backbone networks and interaction modules
+│       │   ├── gnn/                  # Graph Neural Network backbones
+│       │   │   └── backbone.py
+│       │   ├── gvp/                  # Geometric Vector Perceptron backbones
+│       │   │   ├── backbone.py
+│       │   │   └── gvp_local/        # Atom-level GVP extensions
+│       │   │       ├── atom3d.py
+│       │   │       ├── data.py
+│       │   │       └── models.py
+│       │   ├── seq_mlp/              # Baseline sequence-only encoder
+│       │   │   └── backbone.py
+│       │   ├── plastic_backbone.py   # Polymer Tower (plastic feature encoder)
+│       │   └── interaction_head.py   # Fusion layers (cosine, bilinear, gated, etc.)
+│       │
+│       ├── plastic/             # Polymer feature extraction
+│       │   ├── descriptors_rdkit.py  # RDKit-based descriptor featurizer
+│       │   └── rdkit_features.yaml   # Descriptor configuration file
+│       │
+│       ├── readers/             # Structure parsing utilities
+│       │   └── pdb_reader.py         # Optimized for AlphaFold/ColabFold single-chain PDBs
+│       │
+│       └── viz_graph.py         # Protein–polymer graph visualization
+│
+└── weights/                     # Saved weights (multiple interaction heads)
+```
+### Module Breakdown
+
+#### `builders/`
+Protein graph construction and embeddings
+- `base_builder.py` → Base class for graph builders  
+- `gnn_builder.py` → Builds residue-level graphs for GNN  
+- `gvp_builder.py` → Builds vector–scalar graphs for GVP  
+- `sequence_embedder.py` → Sequence-level embeddings (ESM / one-hot)
+
+#### `heads/`
+Residue-level supervision modules
+- `residue_activity_head.py` → Predict activity scores  
+- `residue_role_head.py` → Predict functional roles (interaction / spectator)
+
+#### `models/`
+Core neural architectures
+- `gnn/backbone.py` → Graph Neural Network backbone  
+- `gvp/backbone.py` → Geometric Vector Perceptron backbone  
+- `gvp_local/` → Atom-level extensions for GVP  
+- `seq_mlp/backbone.py` → Baseline sequence MLP  
+- `plastic_backbone.py` → Polymer Tower (plastic descriptors → embeddings)  
+- `interaction_head.py` → Flexible scoring heads (cosine, bilinear, gated, etc.)
+
+#### `plastic/`
+Polymer-specific feature extraction
+- `descriptors_rdkit.py` → RDKit-based descriptor featurizer  
+- `rdkit_features.yaml` → Descriptor config file
+
+#### `readers/`
+Input parsing utilities
+- `pdb_reader.py` → Parses PDB files (optimized for AlphaFold / ColabFold single-chain structures)
+
+#### `viz_graph.py`
+Visualization tool for protein–polymer interaction graphs.
+
+## Acknowledgements
+
+---
+
+<p align="center">
+  <img src="./doc/xjtlu-ai-china_logo_light.svg" 
+       alt="XJTLU-AI-China Logo" 
+       width="150" 
+       style="vertical-align: middle; margin-right: 30px; filter: drop-shadow(2px 2px 4px rgba(0,0,0,0.3));">
+  <img src="./doc/iGEM_logo_light.jpg" 
+       alt="iGEM Logo" 
+       width="100" 
+       style="vertical-align: middle; filter: drop-shadow(2px 2px 4px rgba(0,0,0,0.3));">
+</p>
+
+This project is part of the **[iGEM 2025 Competition](https://igem.org/)**, developed by the **[XJTLU-AI-China](https://teams.igem.org/5580)** team.
+
+This project was developed in the context of the **iGEM 2025 competition**.
+
+- **XJTLU-AI-China iGEM 2025 Team**: for initiating and developing the PlaszymeGNN project.  
+- **School of Science, Xi’an Jiaotong-Liverpool University (XJTLU)**: for institutional support.  
+- **Prof. [Chun Chan](https://scholar.xjtlu.edu.cn/en/persons/ChunChan)** (Kevin) (School of Science, XJTLU), our **Principal Investigator (PI)**: for providing invaluable guidance and mentorship throughout the project.
+- **[GVP](https://github.com/drorlab/gvp-pytorch)**: for providing the Geometric Vector Perceptron backbone implementation.  
+- **[ESM](https://github.com/facebookresearch/esm)**: for enabling powerful protein sequence and structure embeddings.  
+- We also gratefully acknowledge the **open-source community**, whose tools and resources have made this work possible.  
+
+## License
+
+---
+
+This project is licensed under the [MIT License](./LICENSE).  
+You are free to use, modify, and distribute this project, provided that proper attribution is given.  
